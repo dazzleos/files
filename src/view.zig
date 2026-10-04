@@ -49,21 +49,24 @@ pub const Files = struct {
             .width = @round(300 * s),
             .child = cx.make(ui.Decorated{
                 .color = t.surface_container,
-                .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
-                    // The open folder's row comes into view when it changes.
-                    cx.make(ui.Expanded{ .child = cx.make(ui.ScrollView{ .reveal = pathKey(b.path), .child = cx.make(ui.Padding{
-                        .padding = .symmetric(@round(8 * s), @round(8 * s)),
-                        .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .children = rows.items }),
-                    }) }) }),
-                    divider(cx, .horizontal),
-                    // Whether the system's files are shown, or only the
-                    // user's.
-                    cx.make(ui.Padding{ .padding = .symmetric(@round(16 * s), @round(8 * s)), .child = cx.make(ui.Switch{
-                        .value = b.show_system,
-                        .on_changed = systemCallback(cx, b),
-                        .label = "System files",
-                    }) }),
-                } }),
+                .child = cx.make(ui.Column{
+                    .cross_axis_alignment = .stretch,
+                    .children = &.{
+                        // The open folder's row comes into view when it changes.
+                        cx.make(ui.Expanded{ .child = cx.make(ui.ScrollView{ .reveal = pathKey(b.path), .child = cx.make(ui.Padding{
+                            .padding = .symmetric(@round(8 * s), @round(8 * s)),
+                            .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .children = rows.items }),
+                        }) }) }),
+                        divider(cx, .horizontal),
+                        // Whether the system's files are shown, or only the
+                        // user's.
+                        cx.make(ui.Padding{ .padding = .symmetric(@round(16 * s), @round(8 * s)), .child = cx.make(ui.Switch{
+                            .value = b.show_system,
+                            .on_changed = systemCallback(cx, b),
+                            .label = "System files",
+                        }) }),
+                    },
+                }),
             }),
         });
 
