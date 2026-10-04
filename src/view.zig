@@ -43,20 +43,31 @@ pub const Files = struct {
         const a = cx.ui.arena();
 
         var rows: std.ArrayList(ui.Widget) = .empty;
-        self.treeRows(cx, &rows, "/", "/", 0);
+        const root = b.root();
+        self.treeRows(cx, &rows, root, if (std.mem.eql(u8, root, b.home)) "Home" else root, 0);
         const tree = cx.make(ui.SizedBox{
             .width = @round(300 * s),
             .child = cx.make(ui.Decorated{
                 .color = t.surface_container,
-                // The open folder's row comes into view when it changes.
-                .child = cx.make(ui.ScrollView{ .reveal = pathKey(b.path), .child = cx.make(ui.Padding{
-                    .padding = .symmetric(@round(8 * s), @round(8 * s)),
-                    .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .children = rows.items }),
-                }) }),
+                .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
+                    // The open folder's row comes into view when it changes.
+                    cx.make(ui.Expanded{ .child = cx.make(ui.ScrollView{ .reveal = pathKey(b.path), .child = cx.make(ui.Padding{
+                        .padding = .symmetric(@round(8 * s), @round(8 * s)),
+                        .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .children = rows.items }),
+                    }) }) }),
+                    divider(cx, .horizontal),
+                    // Whether the system's files are shown, or only the
+                    // user's.
+                    cx.make(ui.Padding{ .padding = .symmetric(@round(16 * s), @round(8 * s)), .child = cx.make(ui.Switch{
+                        .value = b.show_system,
+                        .on_changed = systemCallback(cx, b),
+                        .label = "System files",
+                    }) }),
+                } }),
             }),
         });
 
-        const at_root = std.mem.eql(u8, b.path, "/");
+        const at_root = b.atRoot();
         const header = cx.make(ui.Padding{ .padding = .symmetric(@round(16 * s), @round(12 * s)), .child = cx.make(ui.Row{ .spacing = @round(16 * s), .children = &.{
             cx.make(ui.OutlinedButton{ .label = "Up", .on_press = if (at_root) null else callback(cx, .{ .browser = b }, Act.up) }),
             cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = b.path, .style = .{ .size = 20 * s }, .wrap = false, .ellipsis = true }) }),
@@ -192,6 +203,16 @@ const Act = struct {
         a.browser.request(.up);
     }
 };
+
+fn systemCallback(cx: *ui.Context, b: *Browser) ?ui.ValueCallback(bool) {
+    const p = cx.ui.arena().create(Act) catch return null;
+    p.* = .{ .browser = b };
+    return .of(p, struct {
+        fn set(a: *const Act, on: bool) void {
+            a.browser.request(.{ .show_system = on });
+        }
+    }.set);
+}
 
 fn callback(cx: *ui.Context, act: Act, comptime f: fn (*const Act) void) ?ui.Callback {
     const p = cx.ui.arena().create(Act) catch return null;
@@ -433,10 +454,18 @@ test "the tree and the grid fit, at the shell's sizes" {
         u.frame(size[0], size[1], 0, Files{ .browser = &b, .scale = scaleFor(size[0], size[1]), .bar_scale = @as(f32, @floatFromInt(size[2])) / 1920 });
         try testing.expect(!overflows(u.root.?));
     }
-    // The tree: "/", the folders down to the open one, and its folders.
-    try testing.expect(findText(u.root.?, "/") != null);
-    try testing.expect(findText(u.root.?, "tmp") != null);
-    try testing.expect(findText(u.root.?, std.fs.path.basename(t.path)) != null);
+    // The tree: home and its folders, and nothing above it; the switch for
+    // the system's files.
+    try testing.expect(findText(u.root.?, "Home") != null);
+    try testing.expect(findText(u.root.?, "z-link") != null);
+    try testing.expect(findText(u.root.?, "tmp") == null);
+    try testing.expect(findText(u.root.?, "System files") != null);
+    // Fits with them shown, too.
+    try b.showSystem(true);
+    for ([_][3]u32{ .{ 1920, 1036, 1920 }, .{ 640, 334, 1280 } }) |size| {
+        u.frame(size[0], size[1], 0, Files{ .browser = &b, .scale = scaleFor(size[0], size[1]), .bar_scale = @as(f32, @floatFromInt(size[2])) / 1920 });
+        try testing.expect(!overflows(u.root.?));
+    }
     // The grid, and how many items there are.
     try testing.expect(findText(u.root.?, "b-file") != null);
     try testing.expect(findText(u.root.?, "5 items") != null);
@@ -473,32 +502,39 @@ test "clicking in the grid and the tree" {
     try testing.expect(std.mem.endsWith(u8, b.path, "/A-folder"));
     try testing.expect(findText(u.root.?, "This folder is empty") != null);
 
-    // Up goes back.
+    // Up goes back, as far as home (where it is disabled).
     click(u, up(findText(u.root.?, "Up").?, ui.OutlinedButton).?);
     Frame(u, &b, &now);
     try testing.expectEqualStrings(t.path, b.path);
+    try testing.expect(up(findText(u.root.?, "Up").?, ui.OutlinedButton).?.widget.as(ui.OutlinedButton).?.on_press == null);
 
-    // The arrow closes a folder in the tree (its folders go), and clicking
-    // a folder in the tree opens it.
-    var row = up(findText(u.root.?, std.fs.path.basename(t.path)).?, TreeRow).?;
-    // The host may have many folders above it: scroll the tree to it.
-    const tree = up(row, ui.ScrollView).?;
-    _ = tree.state(ui.ScrollView.State).scrollTo(row.position()[1] - tree.position()[1] + tree.state(ui.ScrollView.State).offset);
-    Frame(u, &b, &now);
-    row = up(findText(u.root.?, std.fs.path.basename(t.path)).?, TreeRow).?;
-    try testing.expect(findText(row.parent.?, "z-link") != null);
-    var arrows: ?*ui.Node = null;
-    for (row.children.items) |ch| arrows = arrows orelse findDisclosure(ch);
-    click(u, arrows.?);
+    // The arrow closes home in the tree (its folders go).
+    const home_row = up(findText(u.root.?, "Home").?, TreeRow).?;
+    try testing.expect(findText(home_row.parent.?, "z-link") != null);
+    click(u, findDisclosure(home_row).?);
     Frame(u, &b, &now);
     try testing.expect(!b.isExpanded(t.path));
-    try testing.expectEqualStrings(t.path, b.path);
+    try testing.expect(findText(up(findText(u.root.?, "Home").?, ui.ScrollView).?, "z-link") == null);
+
+    // The switch shows the system's files: the tree starts at /, and a
+    // folder above home opens.
+    click(u, up(findText(u.root.?, "System files").?, ui.Switch).?);
+    Frame(u, &b, &now);
+    try testing.expect(b.show_system);
+    try testing.expect(findText(u.root.?, "/") != null);
+    // The host may have many folders: scroll the tree to /tmp's row.
+    const tree = up(findText(u.root.?, "/").?, ui.ScrollView).?;
     const tmp = up(findText(u.root.?, "tmp").?, TreeRow).?;
     _ = tree.state(ui.ScrollView.State).scrollTo(tmp.position()[1] - tree.position()[1] + tree.state(ui.ScrollView.State).offset);
     Frame(u, &b, &now);
     click(u, up(findText(u.root.?, "tmp").?, TreeRow).?);
     Frame(u, &b, &now);
     try testing.expectEqualStrings("/tmp", b.path);
+    // Off again: back home.
+    click(u, up(findText(u.root.?, "System files").?, ui.Switch).?);
+    Frame(u, &b, &now);
+    try testing.expect(!b.show_system);
+    try testing.expectEqualStrings(t.path, b.path);
 }
 
 fn findType(n: *ui.Node, comptime T: type) ?*ui.Node {

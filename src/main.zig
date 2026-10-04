@@ -62,7 +62,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     const window_ui = try ui.Ui.create(gpa, if (f) |*fnt| fnt else null);
     try window_ui.attachGpu(dev);
 
-    var browser = try browser_mod.Browser.init(gpa, "/");
+    // The user's files: the SD card's space for them.
+    var browser = try browser_mod.Browser.init(gpa, sys.system.data_dir);
     defer browser.deinit();
 
     // What the title bar's buttons do. Its size stays as it was for the
