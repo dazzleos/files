@@ -138,13 +138,11 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
 
 fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal, dev: *vc4.Device) !*app.Window {
     const Environ = std.process.Environ;
-    const display_name = Environ.getPosix(init.environ, "WAYLAND_DISPLAY") orelse {
-        print("dazzle-files: WAYLAND_DISPLAY is not set; run me under dazzle-shell\n", .{});
-        return error.NoCompositor;
-    };
+    // Dazzle's compositor listens on /wayland-0; elsewhere, where
+    // WAYLAND_DISPLAY and XDG_RUNTIME_DIR say.
     var path_buf: [128]u8 = undefined;
-    const path = wayland.client.socketPath(&path_buf, Environ.getPosix(init.environ, "XDG_RUNTIME_DIR"), display_name) catch {
-        print("dazzle-files: XDG_RUNTIME_DIR is not set\n", .{});
+    const path = wayland.client.socketPath(&path_buf, Environ.getPosix(init.environ, "XDG_RUNTIME_DIR"), Environ.getPosix(init.environ, "WAYLAND_DISPLAY")) catch {
+        print("dazzle-files: WAYLAND_DISPLAY needs XDG_RUNTIME_DIR\n", .{});
         return error.NoCompositor;
     };
     const win = app.Window.open(gpa, .device(dev), path, "Files") catch |err| {
