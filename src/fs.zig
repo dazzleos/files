@@ -188,7 +188,7 @@ pub const TestTree = struct {
     /// (executable), `<tmp>/.hidden`, `<tmp>/z-link` (to A-folder) and
     /// `<tmp>/broken` (a link to nothing).
     pub fn init(t: *TestTree) !void {
-        t.path = try std.fmt.bufPrint(&t.path_buf, "/tmp/stardust-files-test-{d}", .{linux.getpid()});
+        t.path = try std.fmt.bufPrint(&t.path_buf, "/tmp/dazzle-files-test-{d}", .{linux.getpid()});
         var z: [128]u8 = undefined;
         _ = linux.mkdir(try std.fmt.bufPrintZ(&z, "{s}", .{t.path}), 0o755);
         _ = linux.mkdir(try std.fmt.bufPrintZ(&z, "{s}/A-folder", .{t.path}), 0o755);
@@ -241,7 +241,7 @@ test "a listing has folders first, then files by name, with their kinds" {
     try testing.expectEqual(@as(usize, 2), l.folders().len);
 
     // A folder that is not there gives an empty listing, saying why.
-    var missing = Listing.read(testing.allocator, "/nonexistent-stardust-folder");
+    var missing = Listing.read(testing.allocator, "/nonexistent-dazzle-folder");
     defer missing.deinit();
     try testing.expectEqual(@as(?sys.Error, error.NotFound), missing.err);
     try testing.expectEqual(@as(usize, 0), missing.entries.len);

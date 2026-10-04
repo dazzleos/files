@@ -1,10 +1,10 @@
-//! Stardust's Files app: browses the files on the system, starting at the
+//! Dazzle's Files app: browses the files on the system, starting at the
 //! root. The tree of folders is on the left and the open folder's
 //! contents, as a grid of icons, on the right (see view.zig); folders are
 //! read when they are opened (see fs.zig and browser.zig). The window is
 //! built with the `ui` toolkit, and only what changed is drawn again.
 //!
-//!     stardust-files [font.ttf]
+//!     dazzle-files [font.ttf]
 //!
 //! It runs until it is stopped or its window is closed.
 
@@ -36,7 +36,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     var font_buf: [512]u8 = undefined;
     const font_path: [*:0]const u8 = args.next() orelse (sys.appFile(&font_buf, font.default_font_file) catch font.default_font_file);
     run(init, font_path) catch |err| {
-        print("stardust-files: error: {s}\n", .{@errorName(err)});
+        print("dazzle-files: error: {s}\n", .{@errorName(err)});
         return 1;
     };
     return 0;
@@ -45,7 +45,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
 fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     const gpa = std.heap.page_allocator;
     var dev = vc4.device.openRender() catch |err| {
-        print("stardust-files: no GPU ({s})\n", .{@errorName(err)});
+        print("dazzle-files: no GPU ({s})\n", .{@errorName(err)});
         return err;
     };
     const win = try openWindow(gpa, init, &dev);
@@ -54,7 +54,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
 
     var f: ?font.Font = blk: {
         const data = sys.readFileAlloc(gpa, font_path, 32 * 1024 * 1024) catch |err| {
-            print("stardust-files: cannot read the font {s} ({s}); no text\n", .{ font_path, @errorName(err) });
+            print("dazzle-files: cannot read the font {s} ({s}); no text\n", .{ font_path, @errorName(err) });
             break :blk null;
         };
         break :blk font.Font.init(data) catch null;
@@ -81,7 +81,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             break :blk win.wait(timeout);
         } else win.poll();
         waited catch |err| {
-            if (err == error.ServerError) print("stardust-files: compositor error: {s}\n", .{win.conn.errorMessage()});
+            if (err == error.ServerError) print("dazzle-files: compositor error: {s}\n", .{win.conn.errorMessage()});
             return err;
         };
         if (win.closed or controls.quit) return;
@@ -139,19 +139,19 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
 fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal, dev: *vc4.Device) !*app.Window {
     const Environ = std.process.Environ;
     const display_name = Environ.getPosix(init.environ, "WAYLAND_DISPLAY") orelse {
-        print("stardust-files: WAYLAND_DISPLAY is not set; run me under stardust-shell\n", .{});
+        print("dazzle-files: WAYLAND_DISPLAY is not set; run me under dazzle-shell\n", .{});
         return error.NoCompositor;
     };
     var path_buf: [128]u8 = undefined;
     const path = wayland.client.socketPath(&path_buf, Environ.getPosix(init.environ, "XDG_RUNTIME_DIR"), display_name) catch {
-        print("stardust-files: XDG_RUNTIME_DIR is not set\n", .{});
+        print("dazzle-files: XDG_RUNTIME_DIR is not set\n", .{});
         return error.NoCompositor;
     };
     const win = app.Window.open(gpa, .device(dev), path, "Files") catch |err| {
-        print("stardust-files: cannot open a window on {s} ({s})\n", .{ path, @errorName(err) });
+        print("dazzle-files: cannot open a window on {s} ({s})\n", .{ path, @errorName(err) });
         return err;
     };
-    try win.setAppId("stardust-files");
+    try win.setAppId("dazzle-files");
     return win;
 }
 
