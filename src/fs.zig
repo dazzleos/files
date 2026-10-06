@@ -24,6 +24,8 @@ pub const Entry = struct {
     link: bool = false,
     /// In bytes, for files.
     size: u64 = 0,
+    /// For folders: whether there are folders in it, if that is known.
+    subfolders: ?bool = null,
 };
 
 /// The most entries read from one folder.
@@ -82,9 +84,10 @@ pub const Listing = struct {
                 if (entries.items.len == max_entries) continue;
                 var e: Entry = .{ .name = a.dupe(u8, name) catch return error.OutOfMemory, .kind = .other, .link = d_type == dt_lnk };
                 var stx: linux.Statx = undefined;
-                if (linux.errno(linux.statx(dir, name_z, 0, .{ .TYPE = true, .MODE = true, .SIZE = true }, &stx)) == .SUCCESS) {
+                if (linux.errno(linux.statx(dir, name_z, 0, .{ .TYPE = true, .MODE = true, .SIZE = true, .NLINK = true }, &stx)) == .SUCCESS) {
                     e.kind = kindOf(stx.mode);
                     if (e.kind == .file or e.kind == .program) e.size = stx.size;
+                    if (e.kind == .folder and stx.mask.NLINK) e.subfolders = hasSubfolders(stx.nlink);
                 }
                 entries.append(a, e) catch return error.OutOfMemory;
             }
@@ -95,6 +98,13 @@ pub const Listing = struct {
 };
 
 const dt_lnk = 10;
+
+/// Whether a folder with `nlink` links has folders in it: each has a link
+/// to it (its ".."), as do its own "." and its name in its parent. Some
+/// filesystems (btrfs) do not count them: unknown.
+fn hasSubfolders(nlink: u32) ?bool {
+    return if (nlink < 2) null else nlink > 2;
+}
 
 fn kindOf(mode: u16) Kind {
     return switch (mode & linux.S.IFMT) {
@@ -239,6 +249,17 @@ test "a listing has folders first, then files by name, with their kinds" {
     }
     try testing.expectEqual(@as(u64, 5), l.entries[2].size);
     try testing.expectEqual(@as(usize, 2), l.folders().len);
+    // A-folder (and the link to it) has no folders in it.
+    try testing.expectEqual(@as(?bool, false), l.entries[0].subfolders);
+    try testing.expectEqual(@as(?bool, false), l.entries[1].subfolders);
+    try testing.expectEqual(@as(?bool, null), l.entries[2].subfolders);
+    // The test folder has.
+    var tmp = Listing.read(testing.allocator, parent(t.path));
+    defer tmp.deinit();
+    for (tmp.entries) |e| if (std.mem.eql(u8, e.name, baseName(t.path))) {
+        try testing.expect(e.subfolders orelse true);
+    };
+    try testing.expectEqual(@as(?bool, null), hasSubfolders(1));
 
     // A folder that is not there gives an empty listing, saying why.
     var missing = Listing.read(testing.allocator, "/nonexistent-dazzle-folder");

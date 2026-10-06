@@ -44,7 +44,7 @@ pub const Files = struct {
 
         var rows: std.ArrayList(ui.Widget) = .empty;
         const root = b.root();
-        self.treeRows(cx, &rows, root, if (std.mem.eql(u8, root, b.home)) "Home" else root, 0);
+        self.treeRows(cx, &rows, root, if (std.mem.eql(u8, root, b.home)) "Home" else root, null, 0);
         const tree = cx.make(ui.SizedBox{
             .width = @round(300 * s),
             .child = cx.make(ui.Decorated{
@@ -131,8 +131,8 @@ pub const Files = struct {
     }
 
     /// A row for the folder at `path`, and rows for the folders in it if it
-    /// is open.
-    fn treeRows(self: *const Files, cx: *ui.Context, rows: *std.ArrayList(ui.Widget), path: []const u8, label: []const u8, depth: usize) void {
+    /// is open. `subfolders` is whether there are folders in it, if known.
+    fn treeRows(self: *const Files, cx: *ui.Context, rows: *std.ArrayList(ui.Widget), path: []const u8, label: []const u8, subfolders: ?bool, depth: usize) void {
         const b = self.browser;
         if (rows.items.len >= max_tree_rows) return;
         const a = cx.ui.arena();
@@ -142,6 +142,8 @@ pub const Files = struct {
             .label = label,
             .depth = depth,
             .expanded = expanded,
+            // An arrow only if opening it in the tree shows something.
+            .expandable = if (expanded) b.subfolders(path).len > 0 else subfolders orelse true,
             .selected = selected,
             .scale = self.scale,
             .on_open = callback(cx, .{ .browser = b, .path = path }, Act.open),
@@ -152,7 +154,7 @@ pub const Files = struct {
         if (!expanded) return;
         for (b.subfolders(path)) |e| {
             const child = fs.join(a, path, e.name) catch return;
-            self.treeRows(cx, rows, child, e.name, depth + 1);
+            self.treeRows(cx, rows, child, e.name, e.subfolders, depth + 1);
         }
     }
 
@@ -236,12 +238,13 @@ fn divider(cx: *ui.Context, axis: ui.widgets.Axis) ui.Widget {
     return cx.make(if (axis == .vertical) ui.SizedBox{ .width = 1, .child = line } else ui.SizedBox{ .height = 1, .child = line });
 }
 
-/// A folder in the tree: an arrow that opens or closes it there, its icon
-/// and its name, indented by how deep it is.
+/// A folder in the tree: an arrow that opens or closes it there (if there
+/// are folders in it), its icon and its name, indented by how deep it is.
 pub const TreeRow = struct {
     label: []const u8,
     depth: usize,
     expanded: bool,
+    expandable: bool = true,
     selected: bool,
     scale: f32,
     on_open: ?ui.Callback,
@@ -262,7 +265,10 @@ pub const TreeRow = struct {
             .child = cx.make(ui.SizedBox{ .height = height, .child = cx.make(ui.Padding{
                 .padding = .{ .left = @round(4 * s + @as(f32, @floatFromInt(@min(self.depth, 16))) * 18 * s), .right = @round(12 * s) },
                 .child = cx.make(ui.Row{ .spacing = @round(6 * s), .children = &.{
-                    cx.make(Disclosure{ .expanded = self.expanded, .size = @round(28 * s), .on_press = self.on_toggle }),
+                    if (self.expandable)
+                        cx.make(Disclosure{ .expanded = self.expanded, .size = @round(28 * s), .on_press = self.on_toggle })
+                    else
+                        cx.make(ui.SizedBox{ .width = @round(28 * s), .height = @round(28 * s) }),
                     cx.make(FileIcon{ .kind = .folder, .size = @round(24 * s) }),
                     cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = self.label, .style = .{ .size = 17 * s }, .wrap = false, .ellipsis = true }) }),
                 } }),
@@ -510,6 +516,10 @@ test "clicking in the grid and the tree" {
     Frame(u, &b, &now);
     try testing.expectEqualStrings(t.path, b.path);
     try testing.expect(up(findText(u.root.?, "Up").?, ui.OutlinedButton).?.widget.as(ui.OutlinedButton).?.on_press == null);
+
+    // Only folders with folders in them have an arrow.
+    try testing.expect(findDisclosure(up(findText(u.root.?, "A-folder").?, TreeRow).?) == null);
+    try testing.expect(findDisclosure(up(findText(u.root.?, "z-link").?, TreeRow).?) == null);
 
     // The arrow closes home in the tree (its folders go).
     const home_row = up(findText(u.root.?, "Home").?, TreeRow).?;
