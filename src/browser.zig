@@ -1,5 +1,6 @@
 //! What the Files window shows: the open folder (and what is in it), the
-//! item picked in it, and the folders opened in the tree (with the folders
+//! item picked in it (and what is in it, if it is a file: see
+//! content.zig), and the folders opened in the tree (with the folders
 //! in each, read when it is opened). Everything is within a root: the
 //! user's files (`home`: /data, the SD card's space for them) unless the
 //! system's files are shown too, when it is /; nothing above it is opened.
@@ -10,16 +11,19 @@
 
 const std = @import("std");
 const fs = @import("fs.zig");
+const content = @import("content.zig");
 
 pub const Action = union(enum) {
     /// Show this folder.
     open: []const u8,
     /// Open or close this folder in the tree.
     toggle: []const u8,
-    /// An item in the open folder (an index into its entries): a folder is
-    /// opened, anything else picked.
+    /// An item in the open folder (an index into its entries): a folder
+    /// is opened, and a file shown; anything else (a device, say) is only
+    /// picked.
     activate: usize,
-    /// The folder holding the open one.
+    /// Back from the file shown to its folder, or else to the folder
+    /// holding the open one.
     up,
     /// Show the system's files too (the root is /), or only the user's.
     show_system: bool,
@@ -36,6 +40,8 @@ pub const Browser = struct {
     listing: fs.Listing,
     /// The item picked in it.
     selected: ?usize = null,
+    /// The file shown (the item picked), and what is in it.
+    file: ?content.Content = null,
     /// The folders open in the tree, and the folders in each.
     expanded: std.StringHashMapUnmanaged(fs.Listing) = .empty,
     /// What was asked for since the last `apply`, and room for its path.
@@ -66,6 +72,7 @@ pub const Browser = struct {
             b.gpa.free(e.key_ptr.*);
         }
         b.expanded.deinit(b.gpa);
+        b.closeFile();
         b.listing.deinit();
         b.gpa.free(b.path);
         b.pending_path.deinit(b.gpa);
@@ -94,7 +101,7 @@ pub const Browser = struct {
             .open => |path| b.open(path) catch {},
             .toggle => |path| b.toggle(path) catch {},
             .activate => |i| b.activate(i) catch {},
-            .up => if (!b.atRoot()) b.open(fs.parent(b.path)) catch {},
+            .up => if (b.file != null) b.closeFile() else if (!b.atRoot()) b.open(fs.parent(b.path)) catch {},
             .show_system => |on| b.showSystem(on) catch {},
         }
         return true;
@@ -115,6 +122,7 @@ pub const Browser = struct {
         const new = try b.gpa.dupe(u8, path);
         b.gpa.free(b.path);
         b.path = new;
+        b.closeFile();
         b.listing.deinit();
         b.listing = fs.Listing.read(b.gpa, new);
         b.selected = null;
@@ -125,12 +133,33 @@ pub const Browser = struct {
         if (i >= b.listing.entries.len) return;
         const e = b.listing.entries[i];
         if (e.kind != .folder) {
+            b.closeFile();
             b.selected = i;
+            // Only files are read: opening a device can do things (start
+            // the watchdog, say).
+            if (e.kind == .file or e.kind == .program) {
+                const path = try fs.join(b.gpa, b.path, e.name);
+                defer b.gpa.free(path);
+                b.file = content.Content.read(b.gpa, path);
+            }
             return;
         }
         const path = try fs.join(b.gpa, b.path, e.name);
         defer b.gpa.free(path);
         try b.open(path);
+    }
+
+    /// Stops showing the file (it stays picked).
+    pub fn closeFile(b: *Browser) void {
+        if (b.file) |*f| f.deinit();
+        b.file = null;
+    }
+
+    /// The path of the file shown (in `gpa`), if one is.
+    pub fn filePath(b: *const Browser, gpa: std.mem.Allocator) ?[]u8 {
+        if (b.file == null) return null;
+        const i = b.selected orelse return null;
+        return fs.join(gpa, b.path, b.listing.entries[i].name) catch null;
     }
 
     /// Opens the folder at `path` in the tree, or closes it.
@@ -188,10 +217,18 @@ test "opening folders, from the tree and the grid, and going up as far as home" 
     try testing.expectEqual(@as(usize, 2), b.subfolders(t.path).len);
     try testing.expectEqual(@as(usize, 5), b.listing.entries.len);
 
-    // A file is picked; a folder is opened.
+    // A file is shown (and picked), and Up goes back to its folder; a
+    // folder is opened.
     b.request(.{ .activate = 2 });
     try testing.expect(b.apply());
     try testing.expectEqual(@as(?usize, 2), b.selected);
+    try testing.expectEqualStrings("hello", b.file.?.kind.text[0]);
+    b.request(.up);
+    _ = b.apply();
+    try testing.expect(b.file == null);
+    try testing.expectEqualStrings(t.path, b.path);
+    b.request(.{ .activate = 2 });
+    _ = b.apply();
     b.request(.{ .activate = 0 });
     _ = b.apply();
     try testing.expect(std.mem.endsWith(u8, b.path, "/A-folder"));

@@ -12,6 +12,7 @@ const ui = @import("ui");
 const gfx = @import("gfx");
 const fs = @import("fs.zig");
 const browser_mod = @import("browser.zig");
+const viewer = @import("viewer.zig");
 
 const Browser = browser_mod.Browser;
 
@@ -36,6 +37,8 @@ pub const Files = struct {
     on_drag: ?ui.Callback = null,
     maximized: bool = true,
     bar_scale: f32 = 1,
+    /// The window's width (a file's bytes are shown as many a row as fit).
+    width: f32 = 1600,
 
     pub fn build(self: *const Files, cx: *ui.Context) ui.Widget {
         const s = self.scale;
@@ -82,11 +85,13 @@ pub const Files = struct {
             }),
         });
 
-        const at_root = b.atRoot();
+        const at_root = b.atRoot() and b.file == null;
         // The path, and under it what the folder is for (if it is one of
-        // the system's).
-        const path_text = cx.make(ui.Text{ .text = b.path, .style = .{ .size = 20 * s }, .wrap = false, .ellipsis = true });
-        const about = if (fs.describe(b.path)) |d| cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = @round(2 * s), .children = &.{
+        // the system's), or what the file shown holds.
+        const file_path = b.filePath(cx.ui.arena());
+        const path_text = cx.make(ui.Text{ .text = file_path orelse b.path, .style = .{ .size = 20 * s }, .wrap = false, .ellipsis = true });
+        const description: ?[]const u8 = if (b.file) |*f| (if (f.err == null) viewer.describe(cx, f) else null) else fs.describe(b.path);
+        const about = if (description) |d| cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = @round(2 * s), .children = &.{
             path_text,
             cx.make(ui.Text{ .text = d, .style = .{ .size = 15 * s, .color = t.on_surface_variant }, .wrap = false, .ellipsis = true }),
         } }) else path_text;
@@ -95,7 +100,9 @@ pub const Files = struct {
             cx.make(ui.Expanded{ .child = about }),
         } }) });
 
-        const content = if (b.listing.err) |err|
+        const content = if (b.file) |*f|
+            viewer.view(cx, s, f, self.width - @round(300 * s) - 1).withKey(pathKey(file_path orelse ""))
+        else if (b.listing.err) |err|
             message(cx, s, switch (err) {
                 error.AccessDenied => "You are not allowed to look in this folder",
                 error.NotFound => "This folder is not there any more",
@@ -519,6 +526,27 @@ test "the tree and the grid fit, at the shell's sizes" {
     try testing.expect(findText(u.root.?, "b-file") != null);
     try testing.expect(findText(u.root.?, "5 items") != null);
 
+    // A file shown fits too: text, and bytes (as many a row as fit).
+    b.request(.{ .activate = 2 });
+    _ = b.apply();
+    try testing.expect(b.file.?.kind == .text);
+    for (shell_sizes) |size| {
+        u.frame(size[0], size[1], 0, Files{ .browser = &b, .scale = scaleFor(size[2], size[3]), .bar_scale = @as(f32, @floatFromInt(size[2])) / 1920, .width = @floatFromInt(size[0]) });
+        try testing.expect(!overflows(u.root.?));
+    }
+    try b.showSystem(true);
+    try b.open("/proc/self");
+    for (b.listing.entries, 0..) |e, i| if (std.mem.eql(u8, e.name, "auxv")) b.request(.{ .activate = i });
+    _ = b.apply();
+    try testing.expect(b.file.?.kind == .binary);
+    for (shell_sizes) |size| {
+        u.frame(size[0], size[1], 0, Files{ .browser = &b, .scale = scaleFor(size[2], size[3]), .bar_scale = @as(f32, @floatFromInt(size[2])) / 1920, .width = @floatFromInt(size[0]) });
+        try testing.expect(!overflows(u.root.?));
+        try testing.expect(findType(u.root.?, viewer.HexRow) != null);
+    }
+    // Back home, the folder.
+    try b.showSystem(false);
+
     // Folders that cannot be changed have a lock, in the tree and the grid.
     try b.showSystem(false);
     u.frame(1600, 900, 0, Files{ .browser = &b, .scale = 1 });
@@ -552,11 +580,21 @@ test "clicking in the grid and the tree" {
     }.draw;
     Frame(u, &b, &now);
 
-    // A file is picked, and the line under the grid says what it is.
+    // A file is shown in place of the grid, with what it holds under its
+    // path, and the line at the bottom says what it is; Up goes back.
     click(u, tile(u, "b-file").?);
     Frame(u, &b, &now);
     try testing.expectEqual(@as(?usize, 2), b.selected);
     try testing.expect(findText(u.root.?, "b-file  ·  File  ·  5 bytes") != null);
+    try testing.expect(findText(u.root.?, "hello") != null);
+    try testing.expect(findText(u.root.?, "Text, 1 line") != null);
+    var path_buf: [128]u8 = undefined;
+    try testing.expect(findText(u.root.?, try std.fmt.bufPrint(&path_buf, "{s}/b-file", .{t.path})) != null);
+    try testing.expect(!overflows(u.root.?));
+    click(u, up(findText(u.root.?, "Up").?, ui.OutlinedButton).?);
+    Frame(u, &b, &now);
+    try testing.expect(b.file == null);
+    try testing.expect(tile(u, "A-folder") != null);
 
     // A folder in the grid opens.
     click(u, tile(u, "A-folder").?);

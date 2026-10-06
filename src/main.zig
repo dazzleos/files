@@ -121,6 +121,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
                 .on_drag = .of(&controls, app.Controls.drag),
                 .maximized = win.maximized,
                 .bar_scale = bar_scale,
+                .width = @floatFromInt(width),
             });
             if (window_ui.changed()) {
                 idle = false;
@@ -157,6 +158,9 @@ fn openWindow(gpa: std.mem.Allocator, init: std.process.Init.Minimal, dev: *vc4.
 }
 
 test {
+    _ = @import("decode.zig");
+    _ = @import("content.zig");
+    _ = @import("viewer.zig");
     _ = fs;
     _ = browser_mod;
     _ = view;
