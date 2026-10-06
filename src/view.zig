@@ -41,7 +41,6 @@ pub const Files = struct {
         const s = self.scale;
         const t = cx.theme();
         const b = self.browser;
-        const a = cx.ui.arena();
 
         var rows: std.ArrayList(ui.Widget) = .empty;
         const root = b.root();
@@ -92,21 +91,15 @@ pub const Files = struct {
             })
         else if (b.listing.entries.len == 0)
             message(cx, s, "This folder is empty")
-        else blk: {
-            const tiles: []ui.Widget = a.alloc(ui.Widget, b.listing.entries.len) catch &.{};
-            for (tiles, b.listing.entries, 0..) |*w, e, i| w.* = cx.make(Tile{
-                .entry = e,
-                .selected = b.selected == i,
-                .scale = s,
-                .on_press = callback(cx, .{ .browser = b, .index = i }, Act.activate),
-            });
-            // Another folder starts again at the top.
-            break :blk cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(@round(16 * s)), .child = cx.make(ui.Grid{
+        else
+            // Only the tiles that show are made (a folder can have a
+            // thousand items). Another folder starts again at the top.
+            cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(@round(16 * s)), .child = cx.make(ui.LazyGrid{
+                .count = b.listing.entries.len,
                 .cell = .{ .w = @round(128 * s), .h = @round(124 * s) },
                 .spacing = @round(8 * s),
-                .children = tiles,
+                .item = .of(self, Files.tile),
             }) }) }).withKey(pathKey(b.path));
-        };
 
         const footer = cx.make(ui.Padding{ .padding = .symmetric(@round(16 * s), @round(10 * s)), .child = cx.make(ui.Text{
             .text = self.status(cx),
@@ -166,6 +159,17 @@ pub const Files = struct {
             const child = fs.join(a, path, e.name) catch return;
             self.treeRows(cx, rows, child, e.name, e.subfolders, !e.writable, depth + 1);
         }
+    }
+
+    /// The grid's tile for the open folder's item `i`.
+    fn tile(self: *const Files, cx: *ui.Context, i: usize) ui.Widget {
+        const b = self.browser;
+        return cx.make(Tile{
+            .entry = b.listing.entries[i],
+            .selected = b.selected == i,
+            .scale = self.scale,
+            .on_press = callback(cx, .{ .browser = b, .index = i }, Act.activate),
+        });
     }
 
     /// About the item picked, or what is in the folder.
@@ -643,7 +647,7 @@ fn findType(n: *ui.Node, comptime T: type) ?*ui.Node {
 
 /// The grid's tile for `name`.
 fn tile(u: *ui.Ui, name: []const u8) ?*ui.Node {
-    const grid = findType(u.root.?, ui.Grid) orelse return null;
+    const grid = findType(u.root.?, ui.LazyGrid) orelse return null;
     return up(findText(grid, name) orelse return null, Tile);
 }
 
