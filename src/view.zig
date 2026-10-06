@@ -42,9 +42,21 @@ pub const Files = struct {
         const t = cx.theme();
         const b = self.browser;
 
-        var rows: std.ArrayList(ui.Widget) = .empty;
+        // The folders in the tree; rows are made only for those that show.
+        var items: std.ArrayList(TreeItem) = .empty;
         const root = b.root();
-        self.treeRows(cx, &rows, root, if (std.mem.eql(u8, root, b.home)) "Home" else root, null, !fs.writable(root), 0);
+        self.treeItems(cx, &items, root, if (std.mem.eql(u8, root, b.home)) "Home" else root, null, !fs.writable(root), 0);
+        const open_row: ?usize = for (items.items, 0..) |item, i| {
+            if (std.mem.eql(u8, item.path, b.path)) break i;
+        } else null;
+        const rows = cx.make(ui.LazyGrid{
+            .count = items.items.len,
+            .cell = .{ .w = std.math.inf(f32), .h = @round(40 * s) },
+            .item = .of(makeTree(cx, self, items.items), Tree.row),
+            // The open folder's row is made even when it does not show, for
+            // the tree to scroll to it.
+            .keep = open_row,
+        });
         const tree = cx.make(ui.SizedBox{
             .width = @round(300 * s),
             .child = cx.make(ui.Decorated{
@@ -55,7 +67,7 @@ pub const Files = struct {
                         // The open folder's row comes into view when it changes.
                         cx.make(ui.Expanded{ .child = cx.make(ui.ScrollView{ .reveal = pathKey(b.path), .child = cx.make(ui.Padding{
                             .padding = .symmetric(@round(8 * s), @round(8 * s)),
-                            .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .children = rows.items }),
+                            .child = rows,
                         }) }) }),
                         divider(cx, .horizontal),
                         // Whether the system's files are shown, or only the
@@ -131,33 +143,27 @@ pub const Files = struct {
         } });
     }
 
-    /// A row for the folder at `path`, and rows for the folders in it if it
-    /// is open. `subfolders` is whether there are folders in it, if known;
+    /// The folder at `path` in the tree, and the folders in it if it is
+    /// open. `subfolders` is whether there are folders in it, if known;
     /// `locked`, whether it cannot be changed.
-    fn treeRows(self: *const Files, cx: *ui.Context, rows: *std.ArrayList(ui.Widget), path: []const u8, label: []const u8, subfolders: ?bool, locked: bool, depth: usize) void {
+    fn treeItems(self: *const Files, cx: *ui.Context, items: *std.ArrayList(TreeItem), path: []const u8, label: []const u8, subfolders: ?bool, locked: bool, depth: usize) void {
         const b = self.browser;
-        if (rows.items.len >= max_tree_rows) return;
+        if (items.items.len >= max_tree_rows) return;
         const a = cx.ui.arena();
         const expanded = b.isExpanded(path);
-        const selected = std.mem.eql(u8, path, b.path);
-        const row = cx.make(TreeRow{
+        items.append(a, .{
+            .path = path,
             .label = label,
             .depth = depth,
             .expanded = expanded,
             // An arrow only if opening it in the tree shows something.
             .expandable = if (expanded) b.subfolders(path).len > 0 else subfolders orelse true,
             .locked = locked,
-            .selected = selected,
-            .scale = self.scale,
-            .on_open = callback(cx, .{ .browser = b, .path = path }, Act.open),
-            .on_toggle = callback(cx, .{ .browser = b, .path = path }, Act.toggle),
-        });
-        // The open folder's row has a key, for the tree to scroll to it.
-        rows.append(a, if (selected) row.withKey(pathKey(path)) else row) catch return;
+        }) catch return;
         if (!expanded) return;
         for (b.subfolders(path)) |e| {
             const child = fs.join(a, path, e.name) catch return;
-            self.treeRows(cx, rows, child, e.name, e.subfolders, !e.writable, depth + 1);
+            self.treeItems(cx, items, child, e.name, e.subfolders, !e.writable, depth + 1);
         }
     }
 
@@ -195,6 +201,53 @@ pub const Files = struct {
         return cx.fmt("{d} {s}", .{ n, if (n == 1) "item" else "items" });
     }
 };
+
+/// A folder in the tree.
+const TreeItem = struct {
+    path: []const u8,
+    label: []const u8,
+    depth: usize,
+    expanded: bool,
+    expandable: bool,
+    locked: bool,
+};
+
+/// The tree's folders, for its list to make rows of (made in the frame's
+/// arena).
+const Tree = struct {
+    files: *const Files,
+    items: []const TreeItem,
+
+    fn row(t: *const Tree, cx: *ui.Context, i: usize) ui.Widget {
+        const b = t.files.browser;
+        const item = t.items[i];
+        const selected = std.mem.eql(u8, item.path, b.path);
+        const w = cx.make(TreeRow{
+            .label = item.label,
+            .depth = item.depth,
+            .expanded = item.expanded,
+            .expandable = item.expandable,
+            .locked = item.locked,
+            .selected = selected,
+            .scale = t.files.scale,
+            .on_open = callback(cx, .{ .browser = b, .path = item.path }, Act.open),
+            .on_toggle = callback(cx, .{ .browser = b, .path = item.path }, Act.toggle),
+        });
+        // The open folder's row has a key, for the tree to scroll to it.
+        return if (selected) w.withKey(pathKey(item.path)) else w;
+    }
+};
+
+fn makeTree(cx: *ui.Context, files: *const Files, items: []const TreeItem) *const Tree {
+    const t = cx.ui.arena().create(Tree) catch {
+        const empty = struct {
+            const none: Tree = .{ .files = undefined, .items = &.{} };
+        };
+        return &empty.none;
+    };
+    t.* = .{ .files = files, .items = items };
+    return t;
+}
 
 fn pathKey(path: []const u8) u64 {
     return std.hash.Wyhash.hash(0, path);
@@ -618,12 +671,21 @@ test "clicking in the grid and the tree" {
     Frame(u, &b, &now);
     try testing.expect(b.show_system);
     try testing.expect(findText(u.root.?, "/") != null);
-    // The host may have many folders: scroll the tree to /tmp's row.
-    const tree = up(findText(u.root.?, "/").?, ui.ScrollView).?;
-    const tmp = up(findText(u.root.?, "tmp").?, TreeRow).?;
-    _ = tree.state(ui.ScrollView.State).scrollTo(tmp.position()[1] - tree.position()[1] + tree.state(ui.ScrollView.State).offset);
+    // The host may have many folders, and only the rows that show are
+    // made: scroll the tree down from the top until /tmp's row shows.
+    const tree = up(findType(u.root.?, TreeRow).?, ui.ScrollView).?;
+    const scroll = tree.state(ui.ScrollView.State);
+    _ = scroll.scrollTo(0);
     Frame(u, &b, &now);
-    click(u, up(findText(u.root.?, "tmp").?, TreeRow).?);
+    const tmp = while (true) {
+        if (findText(tree, "tmp")) |text| if (up(text, TreeRow)) |row| {
+            const y = row.position()[1] - tree.position()[1];
+            if (y >= 0 and y + row.size.h <= tree.size.h) break row;
+        };
+        try testing.expect(scroll.scrollTo(scroll.offset + 40));
+        Frame(u, &b, &now);
+    };
+    click(u, tmp);
     Frame(u, &b, &now);
     try testing.expectEqualStrings("/tmp", b.path);
     // A system folder says what it is for.
@@ -647,7 +709,7 @@ fn findType(n: *ui.Node, comptime T: type) ?*ui.Node {
 
 /// The grid's tile for `name`.
 fn tile(u: *ui.Ui, name: []const u8) ?*ui.Node {
-    const grid = findType(u.root.?, ui.LazyGrid) orelse return null;
+    const grid = up(findType(u.root.?, Tile) orelse return null, ui.LazyGrid) orelse return null;
     return up(findText(grid, name) orelse return null, Tile);
 }
 
