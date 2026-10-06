@@ -26,6 +26,9 @@ pub const Entry = struct {
     size: u64 = 0,
     /// For folders: whether there are folders in it, if that is known.
     subfolders: ?bool = null,
+    /// For folders: whether things can be made in it. The system's are
+    /// locked.
+    writable: bool = true,
 };
 
 /// The most entries read from one folder.
@@ -88,6 +91,7 @@ pub const Listing = struct {
                     e.kind = kindOf(stx.mode);
                     if (e.kind == .file or e.kind == .program) e.size = stx.size;
                     if (e.kind == .folder and stx.mask.NLINK) e.subfolders = hasSubfolders(stx.nlink);
+                    if (e.kind == .folder) e.writable = linux.faccessat(dir, name_z, linux.W_OK, 0) == 0;
                 }
                 entries.append(a, e) catch return error.OutOfMemory;
             }
@@ -125,6 +129,13 @@ fn before(_: void, a: Entry, b: Entry) bool {
         .gt => false,
         .eq => std.mem.lessThan(u8, a.name, b.name),
     };
+}
+
+/// Whether things can be made in the folder at `path`.
+pub fn writable(path: []const u8) bool {
+    var buf: [4096]u8 = undefined;
+    const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return false;
+    return linux.access(z, linux.W_OK) == 0;
 }
 
 /// `name` in the folder `dir`.
@@ -260,6 +271,10 @@ test "a listing has folders first, then files by name, with their kinds" {
         try testing.expect(e.subfolders orelse true);
     };
     try testing.expectEqual(@as(?bool, null), hasSubfolders(1));
+    // The test's own folders can be changed.
+    try testing.expect(l.entries[0].writable);
+    try testing.expect(writable(t.path));
+    try testing.expect(!writable("/nonexistent-dazzle-folder"));
 
     // A folder that is not there gives an empty listing, saying why.
     var missing = Listing.read(testing.allocator, "/nonexistent-dazzle-folder");
