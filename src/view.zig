@@ -308,7 +308,7 @@ fn message(cx: *ui.Context, s: f32, text: []const u8) ui.Widget {
     }) }) });
 }
 
-fn divider(cx: *ui.Context, axis: ui.widgets.Axis) ui.Widget {
+fn divider(cx: *ui.Context, axis: ui.Axis) ui.Widget {
     const line = cx.make(ui.Decorated{ .color = cx.theme().outline_variant });
     return cx.make(if (axis == .vertical) ui.SizedBox{ .width = 1, .child = line } else ui.SizedBox{ .height = 1, .child = line });
 }
@@ -483,8 +483,8 @@ fn click(u: *ui.Ui, n: *ui.Node) void {
     const at = n.position();
     const p: ui.Point = .{ at[0] + n.size.w / 2, at[1] + n.size.h / 2 };
     u.pointerMotion(p);
-    u.pointerButton(p, ui.widgets.btn_left, true);
-    u.pointerButton(p, ui.widgets.btn_left, false);
+    u.pointerButton(p, ui.btn_left, true);
+    u.pointerButton(p, ui.btn_left, false);
 }
 
 /// The sizes the shell gives windows, and the size of a maximized one
