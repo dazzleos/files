@@ -71,9 +71,16 @@ pub const Files = struct {
         });
 
         const at_root = b.atRoot();
+        // The path, and under it what the folder is for (if it is one of
+        // the system's).
+        const path_text = cx.make(ui.Text{ .text = b.path, .style = .{ .size = 20 * s }, .wrap = false, .ellipsis = true });
+        const about = if (fs.describe(b.path)) |d| cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = @round(2 * s), .children = &.{
+            path_text,
+            cx.make(ui.Text{ .text = d, .style = .{ .size = 15 * s, .color = t.on_surface_variant }, .wrap = false, .ellipsis = true }),
+        } }) else path_text;
         const header = cx.make(ui.Padding{ .padding = .symmetric(@round(16 * s), @round(12 * s)), .child = cx.make(ui.Row{ .spacing = @round(16 * s), .children = &.{
             cx.make(ui.OutlinedButton{ .label = "Up", .on_press = if (at_root) null else callback(cx, .{ .browser = b }, Act.up) }),
-            cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = b.path, .style = .{ .size = 20 * s }, .wrap = false, .ellipsis = true }) }),
+            cx.make(ui.Expanded{ .child = about }),
         } }) });
 
         const content = if (b.listing.err) |err|
@@ -604,6 +611,12 @@ test "clicking in the grid and the tree" {
     click(u, up(findText(u.root.?, "tmp").?, TreeRow).?);
     Frame(u, &b, &now);
     try testing.expectEqualStrings("/tmp", b.path);
+    // A system folder says what it is for.
+    try testing.expect(findText(u.root.?, "Everything on this computer") == null);
+    b.request(.{ .open = "/" });
+    Frame(u, &b, &now);
+    try testing.expect(findText(u.root.?, "Everything on this computer") != null);
+    try testing.expect(!overflows(u.root.?));
     // Off again: back home.
     click(u, up(findText(u.root.?, "System files").?, ui.Switch).?);
     Frame(u, &b, &now);

@@ -138,6 +138,48 @@ pub fn writable(path: []const u8) bool {
     return linux.access(z, linux.W_OK) == 0;
 }
 
+/// What the folder at `path` is for, in a line, if it is one of the
+/// system's (or the user's files).
+pub fn describe(path: []const u8) ?[]const u8 {
+    for (descriptions) |d| if (std.mem.eql(u8, path, d[0])) return d[1];
+    // Each running program has a folder in /proc, named by its number.
+    if (std.mem.startsWith(u8, path, "/proc/")) {
+        _ = std.fmt.parseInt(u32, path["/proc/".len..], 10) catch return null;
+        return "A program that is running";
+    }
+    return null;
+}
+
+const descriptions = [_]struct { []const u8, []const u8 }{
+    .{ "/", "Everything on this computer" },
+    .{ "/apps", "The apps you can open" },
+    .{ "/os", "Dazzle itself: what makes the computer work" },
+    .{ "/os/shell", "The desktop, and the apps that are part of it" },
+    .{ "/os/firmware", "Programs that run inside hardware, like the Wi-Fi adapter" },
+    .{ sys.fonts_dir, "The lettering the apps use" },
+    .{ "/os/sockets", "Where the system's services listen for apps" },
+    .{ sys.system.data_dir, "The SD card's space for files and settings" },
+    .{ sys.system.config_dir, "This computer's settings" },
+    .{ sys.system.user_dir, "Your files" },
+    .{ "/dev", "The devices in this computer" },
+    .{ "/dev/dri", "The graphics processor" },
+    .{ "/dev/input", "Keyboards, mice and other ways of controlling the computer" },
+    .{ "/dev/snd", "Sound devices" },
+    .{ "/dev/pts", "Text terminals" },
+    .{ "/dev/shm", "Memory programs share with each other" },
+    .{ "/proc", "The programs that are running, and what Linux knows about them" },
+    .{ "/sys", "The hardware, as Linux sees it" },
+    .{ "/sys/block", "Storage, like the SD card" },
+    .{ "/sys/bus", "The connections hardware is attached by, like USB" },
+    .{ "/sys/class", "The hardware, grouped by what it does" },
+    .{ "/sys/devices", "All the hardware, as it is connected" },
+    .{ "/sys/firmware", "What the computer's firmware told Linux about the hardware" },
+    .{ "/sys/fs", "Filesystems: how files are stored" },
+    .{ "/sys/kernel", "Linux's own settings" },
+    .{ "/sys/module", "The parts of Linux that are loaded" },
+    .{ "/sys/power", "Power and sleep" },
+};
+
 /// `name` in the folder `dir`.
 pub fn join(gpa: std.mem.Allocator, dir: []const u8, name: []const u8) ![]u8 {
     if (std.mem.eql(u8, dir, "/")) return std.fmt.allocPrint(gpa, "/{s}", .{name});
@@ -175,6 +217,15 @@ pub fn formatSize(buf: []u8, size: u64) []const u8 {
 }
 
 const testing = std.testing;
+
+test "the system's folders are described" {
+    try testing.expectEqualStrings("The devices in this computer", describe("/dev").?);
+    try testing.expectEqualStrings("Your files", describe("/data/user").?);
+    try testing.expectEqualStrings("A program that is running", describe("/proc/1").?);
+    try testing.expect(describe("/proc/self") == null);
+    try testing.expect(describe("/dev/null") == null);
+    try testing.expect(describe("/data/user/photos") == null);
+}
 
 test "paths" {
     const gpa = testing.allocator;
