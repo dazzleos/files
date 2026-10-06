@@ -91,7 +91,7 @@ pub const Files = struct {
             cx.make(ui.Text{ .text = d, .style = .{ .size = 15 * s, .color = t.on_surface_variant }, .wrap = false, .ellipsis = true }),
         } }) else path_text;
         const header = cx.make(ui.Padding{ .padding = .symmetric(@round(16 * s), @round(12 * s)), .child = cx.make(ui.Row{ .spacing = @round(16 * s), .children = &.{
-            cx.make(ui.OutlinedButton{ .label = "Up", .on_press = if (at_root) null else callback(cx, .{ .browser = b }, Act.up) }),
+            cx.make(ui.OutlinedButton{ .label = "Up", .icon = .arrow_upward, .on_press = if (at_root) null else callback(cx, .{ .browser = b }, Act.up) }),
             cx.make(ui.Expanded{ .child = about }),
         } }) });
 
@@ -228,6 +228,7 @@ const Tree = struct {
             .expanded = item.expanded,
             .expandable = item.expandable,
             .locked = item.locked,
+            .home = item.depth == 0 and std.mem.eql(u8, item.path, b.home),
             .selected = selected,
             .scale = t.files.scale,
             .on_open = callback(cx, .{ .browser = b, .path = item.path }, Act.open),
@@ -314,6 +315,8 @@ pub const TreeRow = struct {
     expanded: bool,
     expandable: bool = true,
     locked: bool = false,
+    /// The user's files: a house rather than a folder.
+    home: bool = false,
     selected: bool,
     scale: f32,
     on_open: ?ui.Callback,
@@ -332,7 +335,7 @@ pub const TreeRow = struct {
             cx.make(Disclosure{ .expanded = self.expanded, .size = @round(28 * s), .on_press = self.on_toggle })
         else
             cx.make(ui.SizedBox{ .width = @round(28 * s), .height = @round(28 * s) });
-        const icon = cx.make(FileIcon{ .kind = .folder, .size = @round(24 * s) });
+        const icon = cx.make(FileIcon{ .kind = .folder, .icon = if (self.home) .home else null, .size = @round(24 * s) });
         const name = cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = self.label, .style = .{ .size = 17 * s }, .wrap = false, .ellipsis = true }) });
         return cx.make(ui.Pressable{ .on_press = self.on_open, .interaction = &state.interaction, .child = cx.make(ui.Decorated{
             .color = highlight,
@@ -340,7 +343,7 @@ pub const TreeRow = struct {
             .child = cx.make(ui.SizedBox{ .height = height, .child = cx.make(ui.Padding{
                 .padding = .{ .left = @round(4 * s + @as(f32, @floatFromInt(@min(self.depth, 16))) * 18 * s), .right = @round(12 * s) },
                 .child = cx.make(ui.Row{ .spacing = @round(6 * s), .children = if (self.locked)
-                    &.{ arrow, icon, name, cx.make(Lock{ .size = @round(18 * s) }) }
+                    &.{ arrow, icon, name, cx.make(ui.Icon{ .icon = .lock, .size = @round(18 * s), .color = t.on_surface_variant }) }
                 else
                     &.{ arrow, icon, name } }),
             }) }),
@@ -360,35 +363,16 @@ const Disclosure = struct {
     };
 
     pub fn build(self: *const Disclosure, cx: *ui.Context, state: *State) ui.Widget {
-        return cx.make(ui.Pressable{ .on_press = self.on_press, .interaction = &state.interaction, .child = cx.make(Arrow{
-            .expanded = self.expanded,
-            .size = self.size,
-            .hovered = state.interaction.hovered,
+        const t = cx.theme();
+        return cx.make(ui.Pressable{ .on_press = self.on_press, .interaction = &state.interaction, .child = cx.make(ui.Decorated{
+            .color = if (state.interaction.hovered) t.on_surface.withAlpha(0.08) else null,
+            .radius = .all(self.size / 2),
+            .child = cx.make(ui.SizedBox{ .width = self.size, .height = self.size, .child = cx.make(ui.Icon{
+                .icon = if (self.expanded) .expand_more else .chevron_right,
+                .size = @round(self.size * 0.75),
+                .color = t.on_surface_variant,
+            }) }),
         }) });
-    }
-};
-
-const Arrow = struct {
-    expanded: bool,
-    size: f32,
-    hovered: bool,
-
-    pub fn layout(self: *const Arrow, _: *ui.Node, c: ui.Constraints) ui.Size {
-        return c.constrain(.{ .w = self.size, .h = self.size });
-    }
-
-    pub fn paint(self: *const Arrow, n: *ui.Node, p: *ui.Painter) void {
-        const t = &n.ui.theme;
-        const c = p.canvas();
-        const mid: gfx.Point = .{ n.size.w / 2, n.size.h / 2 };
-        if (self.hovered) c.fillCircle(mid, n.size.w / 2, t.on_surface.withAlpha(0.08));
-        const r = n.size.w * 0.16;
-        const width = @max(n.size.w / 14, 1.5);
-        if (self.expanded) {
-            c.strokePolyline(&.{ .{ mid[0] - r, mid[1] - r / 2 }, .{ mid[0], mid[1] + r / 2 }, .{ mid[0] + r, mid[1] - r / 2 } }, false, width, t.on_surface_variant);
-        } else {
-            c.strokePolyline(&.{ .{ mid[0] - r / 2, mid[1] - r }, .{ mid[0] + r / 2, mid[1] }, .{ mid[0] - r / 2, mid[1] + r } }, false, width, t.on_surface_variant);
-        }
     }
 };
 
@@ -418,119 +402,51 @@ pub const Tile = struct {
     }
 };
 
-/// A folder, or a page (with a mark for programs and devices), drawn to
-/// fill a square; links get an arrow in the corner, and folders that
-/// cannot be changed (the system's) a lock in the other.
+/// What an item is, as a Material icon (folders in the primary colour);
+/// links get a badge in the corner, and folders that cannot be changed
+/// (the system's) a lock in the other.
 pub const FileIcon = struct {
     kind: fs.Kind,
     link: bool = false,
     locked: bool = false,
     size: f32,
+    /// The icon instead of the kind's.
+    icon: ?ui.icons.Icon = null,
 
-    pub fn layout(self: *const FileIcon, _: *ui.Node, c: ui.Constraints) ui.Size {
-        return c.constrain(.{ .w = self.size, .h = self.size });
-    }
-
-    pub fn paint(self: *const FileIcon, n: *ui.Node, p: *ui.Painter) void {
-        const t = &n.ui.theme;
-        const c = p.canvas();
-        const z = @min(n.size.w, n.size.h);
-        const x0 = (n.size.w - z) / 2;
-        const y0 = (n.size.h - z) / 2;
-        const P = struct {
-            x: f32,
-            y: f32,
-            z: f32,
-            fn at(q: @This(), u: f32, v: f32) gfx.Point {
-                return .{ q.x + u * q.z, q.y + v * q.z };
-            }
-            fn rect(q: @This(), u: f32, v: f32, w: f32, h: f32) gfx.Rect {
-                return .{ .x = q.x + u * q.z, .y = q.y + v * q.z, .w = w * q.z, .h = h * q.z };
-            }
+    pub fn glyph(self: *const FileIcon) ui.icons.Icon {
+        return self.icon orelse switch (self.kind) {
+            .folder => .folder,
+            .file => .description,
+            .program => .terminal,
+            .device => .memory,
+            // A pipe or socket, or a link to nothing.
+            .other => if (self.link) .link_off else .help_outline,
         };
-        const q: P = .{ .x = x0, .y = y0, .z = z };
-        const line = @max(z / 28, 1);
-        switch (self.kind) {
-            .folder => {
-                const back = t.primary.withAlpha(0.55);
-                c.fillRoundedRect(q.rect(0.08, 0.16, 0.36, 0.16), .all(z * 0.04), back);
-                c.fillRoundedRect(q.rect(0.08, 0.22, 0.84, 0.62), .all(z * 0.06), back);
-                c.fillRoundedRect(q.rect(0.08, 0.32, 0.84, 0.54), .all(z * 0.06), t.primary);
-            },
-            else => {
-                const page = [_]gfx.Point{ q.at(0.2, 0.08), q.at(0.6, 0.08), q.at(0.8, 0.28), q.at(0.8, 0.92), q.at(0.2, 0.92) };
-                const fill = if (self.kind == .other) t.surface_container else t.surface_container_highest;
-                c.fillPolygon(&page, fill);
-                c.strokePolyline(&page, true, line, t.outline);
-                c.fillPolygon(&.{ q.at(0.6, 0.08), q.at(0.6, 0.28), q.at(0.8, 0.28) }, t.outline_variant);
-                switch (self.kind) {
-                    .program => c.fillPolygon(&.{ q.at(0.4, 0.44), q.at(0.64, 0.6), q.at(0.4, 0.76) }, t.primary),
-                    .device => {
-                        c.fillRoundedRect(q.rect(0.36, 0.46, 0.28, 0.28), .all(z * 0.03), t.primary_container);
-                        for ([_]f32{ 0.52, 0.6, 0.68 }) |v| {
-                            c.strokePolyline(&.{ q.at(0.3, v), q.at(0.36, v) }, false, line, t.outline);
-                            c.strokePolyline(&.{ q.at(0.64, v), q.at(0.7, v) }, false, line, t.outline);
-                        }
-                    },
-                    .file => for ([_]f32{ 0.46, 0.58, 0.7 }) |v| {
-                        c.strokePolyline(&.{ q.at(0.32, v), q.at(0.68, v) }, false, line, t.on_surface_variant.withAlpha(0.5));
-                    },
-                    else => {},
-                }
-            },
-        }
-        if (self.link) {
-            const mid = q.at(0.24, 0.8);
-            const r = z * 0.14;
-            c.fillCircle(mid, r, t.surface);
-            c.strokeCircle(mid, r, line, t.on_surface_variant);
-            const a = r * 0.45;
-            c.strokePolyline(&.{ .{ mid[0] - a, mid[1] + a }, .{ mid[0] + a, mid[1] - a } }, false, line, t.on_surface_variant);
-            c.strokePolyline(&.{ .{ mid[0] - a * 0.2, mid[1] - a }, .{ mid[0] + a, mid[1] - a }, .{ mid[0] + a, mid[1] + a * 0.2 } }, false, line, t.on_surface_variant);
-        }
-        if (self.locked) {
-            const mid = q.at(0.8, 0.8);
-            const r = z * 0.17;
-            c.fillCircle(mid, r, t.surface);
-            c.strokeCircle(mid, r, line, t.on_surface_variant);
-            paintLock(c, mid, r, t.on_surface_variant);
-        }
+    }
+
+    pub fn build(self: *const FileIcon, cx: *ui.Context) ui.Widget {
+        const t = cx.theme();
+        const main = cx.make(ui.Icon{ .icon = self.glyph(), .size = self.size, .color = if (self.kind == .folder) t.primary else t.on_surface_variant });
+        const link = self.link and self.kind != .other;
+        if (!link and !self.locked) return main;
+        return cx.make(ui.SizedBox{ .width = self.size, .height = self.size, .child = cx.make(ui.Overlay{ .children = &.{
+            main,
+            if (link) self.badge(cx, .link, .bottom_left) else cx.make(ui.Empty{}),
+            if (self.locked) self.badge(cx, .lock, .bottom_right) else cx.make(ui.Empty{}),
+        } }) });
+    }
+
+    /// A small icon on a disc, in a corner.
+    fn badge(self: *const FileIcon, cx: *ui.Context, icon: ui.icons.Icon, corner: ui.Alignment) ui.Widget {
+        const t = cx.theme();
+        const d = @round(self.size * 0.4);
+        return cx.make(ui.Align{ .alignment = corner, .child = cx.make(ui.Decorated{
+            .color = t.surface_container_highest,
+            .radius = .all(d / 2),
+            .child = cx.make(ui.SizedBox{ .width = d, .height = d, .child = cx.make(ui.Icon{ .icon = icon, .size = @round(d * 0.7), .color = t.on_surface }) }),
+        }) });
     }
 };
-
-/// A padlock, beside the name of a folder that cannot be changed.
-const Lock = struct {
-    size: f32,
-
-    pub fn layout(self: *const Lock, _: *ui.Node, c: ui.Constraints) ui.Size {
-        return c.constrain(.{ .w = self.size, .h = self.size });
-    }
-
-    pub fn paint(_: *const Lock, n: *ui.Node, p: *ui.Painter) void {
-        // Filling the square, without a badge's circle around it.
-        paintLock(p.canvas(), .{ n.size.w / 2, n.size.h * 0.55 }, @min(n.size.w, n.size.h) * 0.85, n.ui.theme.on_surface_variant);
-    }
-};
-
-/// A padlock filling a circle of radius `r`: its shackle, an arch over its
-/// body.
-fn paintLock(c: *gfx.Canvas, mid: gfx.Point, r: f32, color: gfx.Color) void {
-    const bw = r * 0.95;
-    const bh = r * 0.7;
-    const body: gfx.Rect = .{ .x = mid[0] - bw / 2, .y = mid[1] - bh * 0.25, .w = bw, .h = bh };
-    const sr = bw * 0.3;
-    const top = body.y - sr * 0.4;
-    var arch: [9]gfx.Point = undefined;
-    for (&arch, 0..) |*pt, i| {
-        const angle = std.math.pi * @as(f32, @floatFromInt(i)) / 8;
-        pt.* = .{ mid[0] - sr * @cos(angle), top - sr * @sin(angle) };
-    }
-    const width = @max(r * 0.16, 1);
-    c.strokePolyline(&.{ .{ arch[0][0], body.y }, arch[0] }, false, width, color);
-    c.strokePolyline(&arch, false, width, color);
-    c.strokePolyline(&.{ arch[8], .{ arch[8][0], body.y } }, false, width, color);
-    c.fillRoundedRect(body, .all(r * 0.12), color);
-}
 
 // --- Tests ---------------------------------------------------------------------
 
@@ -606,12 +522,13 @@ test "the tree and the grid fit, at the shell's sizes" {
     // Folders that cannot be changed have a lock, in the tree and the grid.
     try b.showSystem(false);
     u.frame(1600, 900, 0, Files{ .browser = &b, .scale = 1 });
-    try testing.expect(findType(u.root.?, Lock) == null);
+    try testing.expect(findIcon(u.root.?, .lock) == null);
     b.listing.entries[0].writable = false;
     b.expanded.getPtr(t.path).?.entries[0].writable = false;
     u.frame(1600, 900, 0, Files{ .browser = &b, .scale = 1 });
-    try testing.expect(findType(up(findText(u.root.?, "A-folder").?, TreeRow).?, Lock) != null);
-    try testing.expect(findType(up(findText(u.root.?, "z-link").?, TreeRow).?, Lock) == null);
+    try testing.expect(findIcon(up(findText(u.root.?, "A-folder").?, TreeRow).?, .lock) != null);
+    try testing.expect(findIcon(up(findText(u.root.?, "z-link").?, TreeRow).?, .lock) == null);
+    try testing.expect(findIcon(tile(u, "A-folder").?, .lock) != null);
     try testing.expect(tile(u, "A-folder").?.widget.as(Tile).?.entry.writable == false);
     try testing.expect(!overflows(u.root.?));
 }
@@ -699,6 +616,13 @@ test "clicking in the grid and the tree" {
     Frame(u, &b, &now);
     try testing.expect(!b.show_system);
     try testing.expectEqualStrings(t.path, b.path);
+}
+
+/// The first icon (depth first) that is `icon`.
+fn findIcon(n: *ui.Node, icon: ui.icons.Icon) ?*ui.Node {
+    if (n.widget.as(ui.Icon)) |i| if (i.icon == icon) return n;
+    for (n.children.items) |ch| if (findIcon(ch, icon)) |f| return f;
+    return null;
 }
 
 fn findType(n: *ui.Node, comptime T: type) ?*ui.Node {
