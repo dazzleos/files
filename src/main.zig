@@ -126,7 +126,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
                 const region = window_ui.repaint(win.bufferAge());
                 frame.begin(target, .{ .clear = background });
                 ui.Ui.limit(&frame, &region);
-                try window_ui.render(&frame);
+                try window_ui.render(&frame, win.flusher());
                 try win.render(&frame);
                 var damage: [ui.damage.Region.max_rects]vc4.render.Viewport = undefined;
                 const changed = window_ui.damaged();
