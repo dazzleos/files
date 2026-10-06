@@ -66,10 +66,12 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     var browser = try browser_mod.Browser.init(gpa, sys.system.data_dir);
     defer browser.deinit();
 
-    // What the title bar's buttons do. Its size stays as it was for the
-    // whole screen when the window is restored to half of it.
+    // What the title bar's buttons do. Its size, and everything else's,
+    // stays as it was for the whole screen (the window starts maximized)
+    // when the window is restored to half of it.
     var controls: app.Controls = .{ .win = win };
     const bar_scale = @as(f32, @floatFromInt(width)) / 1920;
+    const scale = view.scaleFor(width, height);
 
     var dirty = true;
     var idle = false;
@@ -113,7 +115,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             dirty = false;
             window_ui.frame(width, height, now, view.Files{
                 .browser = &browser,
-                .scale = view.scaleFor(width, height),
+                .scale = scale,
                 .on_close = .of(&controls, app.Controls.close),
                 .on_maximize = .of(&controls, app.Controls.toggleMaximized),
                 .on_drag = .of(&controls, app.Controls.drag),

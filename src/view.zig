@@ -15,8 +15,9 @@ const browser_mod = @import("browser.zig");
 
 const Browser = browser_mod.Browser;
 
-/// Sizes are designed for a window 900 pixels high (and 1600 wide), and
-/// scale with it.
+/// Sizes are designed for a screen whose maximized windows are 900 pixels
+/// high (and 1600 wide), and scale with it: the scale is the maximized
+/// window's, kept when the window is restored so text stays the same size.
 pub fn scaleFor(width: u32, height: u32) f32 {
     return std.math.clamp(@min(@as(f32, @floatFromInt(width)) / 1600, @as(f32, @floatFromInt(height)) / 900), 0.6, 2);
 }
@@ -506,6 +507,16 @@ fn click(u: *ui.Ui, n: *ui.Node) void {
     u.pointerButton(p, ui.widgets.btn_left, false);
 }
 
+/// The sizes the shell gives windows, and the size of a maximized one
+/// (which sets the scale): maximized and restored on a 1080p screen and a
+/// 720p one.
+const shell_sizes = [_][4]u32{
+    .{ 1920, 1036, 1920, 1036 },
+    .{ 960, 518, 1920, 1036 },
+    .{ 1280, 668, 1280, 668 },
+    .{ 640, 334, 1280, 668 },
+};
+
 test "the tree and the grid fit, at the shell's sizes" {
     var t: fs.TestTree = .{};
     try t.init();
@@ -515,8 +526,8 @@ test "the tree and the grid fit, at the shell's sizes" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
     const u = try ui.Ui.create(testing.allocator, &f);
     defer u.destroy();
-    for ([_][3]u32{ .{ 1920, 1036, 1920 }, .{ 960, 518, 1920 }, .{ 1280, 668, 1280 }, .{ 640, 334, 1280 } }) |size| {
-        u.frame(size[0], size[1], 0, Files{ .browser = &b, .scale = scaleFor(size[0], size[1]), .bar_scale = @as(f32, @floatFromInt(size[2])) / 1920 });
+    for (shell_sizes) |size| {
+        u.frame(size[0], size[1], 0, Files{ .browser = &b, .scale = scaleFor(size[2], size[3]), .bar_scale = @as(f32, @floatFromInt(size[2])) / 1920 });
         try testing.expect(!overflows(u.root.?));
     }
     // The tree: home and its folders, and nothing above it; the switch for
@@ -527,8 +538,8 @@ test "the tree and the grid fit, at the shell's sizes" {
     try testing.expect(findText(u.root.?, "System files") != null);
     // Fits with them shown, too.
     try b.showSystem(true);
-    for ([_][3]u32{ .{ 1920, 1036, 1920 }, .{ 640, 334, 1280 } }) |size| {
-        u.frame(size[0], size[1], 0, Files{ .browser = &b, .scale = scaleFor(size[0], size[1]), .bar_scale = @as(f32, @floatFromInt(size[2])) / 1920 });
+    for (shell_sizes) |size| {
+        u.frame(size[0], size[1], 0, Files{ .browser = &b, .scale = scaleFor(size[2], size[3]), .bar_scale = @as(f32, @floatFromInt(size[2])) / 1920 });
         try testing.expect(!overflows(u.root.?));
     }
     // The grid, and how many items there are.
