@@ -60,6 +60,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         break :blk font.Font.init(data) catch null;
     };
     const window_ui = try ui.Ui.create(gpa, if (f) |*fnt| fnt else null);
+    // Copying and pasting go through the system's clipboard.
+    window_ui.clipboard = .of(&win.clipboard);
     try window_ui.attachGpu(dev);
 
     // The user's files: the SD card's space for them.
