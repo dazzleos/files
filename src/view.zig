@@ -16,32 +16,26 @@ const viewer = @import("viewer.zig");
 
 const Browser = browser_mod.Browser;
 
-/// Sizes are designed for a screen whose maximized windows are 900 pixels
-/// high (and 1600 wide), and scale with it: the scale is the maximized
-/// window's, kept when the window is restored so text stays the same size.
-pub fn scaleFor(width: u32, height: u32) f32 {
-    return std.math.clamp(@min(@as(f32, @floatFromInt(width)) / 1600, @as(f32, @floatFromInt(height)) / 900), 0.6, 2);
-}
+/// The smallest the window may be: the tree, and two columns of the
+/// grid beside it. Everything is the same size in pixels whatever the
+/// window's size; a bigger window shows more.
+pub const min_size = [2]u32{ 640, 420 };
 
 /// The most rows the tree shows.
 pub const max_tree_rows = 2000;
 
 pub const Files = struct {
     browser: *Browser,
-    scale: f32,
     /// The title bar's buttons (close, and maximize, which shows whether
-    /// the window is), pressing the bar (to move the window), and its scale
-    /// (the screen's, so every app's title bar is the same).
+    /// the window is), and pressing the bar (to move the window).
     on_close: ?ui.Callback = null,
     on_maximize: ?ui.Callback = null,
     on_drag: ?ui.Callback = null,
     maximized: bool = true,
-    bar_scale: f32 = 1,
     /// The window's width (a file's bytes are shown as many a row as fit).
     width: f32 = 1600,
 
     pub fn build(self: *const Files, cx: *ui.Context) ui.Widget {
-        const s = self.scale;
         const t = cx.theme();
         const b = self.browser;
 
@@ -54,14 +48,14 @@ pub const Files = struct {
         } else null;
         const rows = cx.make(ui.LazyGrid{
             .count = items.items.len,
-            .cell = .{ .w = std.math.inf(f32), .h = @round(40 * s) },
+            .cell = .{ .w = std.math.inf(f32), .h = 40 },
             .item = .of(makeTree(cx, self, items.items), Tree.row),
             // The open folder's row is made even when it does not show, for
             // the tree to scroll to it.
             .keep = open_row,
         });
         const tree = cx.make(ui.SizedBox{
-            .width = @round(300 * s),
+            .width = 300,
             .child = cx.make(ui.Decorated{
                 .color = t.surface_container,
                 .child = cx.make(ui.Column{
@@ -69,13 +63,13 @@ pub const Files = struct {
                     .children = &.{
                         // The open folder's row comes into view when it changes.
                         cx.make(ui.Expanded{ .child = cx.make(ui.ScrollView{ .reveal = pathKey(b.path), .child = cx.make(ui.Padding{
-                            .padding = .symmetric(@round(8 * s), @round(8 * s)),
+                            .padding = .symmetric(8, 8),
                             .child = rows,
                         }) }) }),
                         divider(cx, .horizontal),
                         // Whether the system's files are shown, or only the
                         // user's.
-                        cx.make(ui.Padding{ .padding = .symmetric(@round(16 * s), @round(8 * s)), .child = cx.make(ui.Switch{
+                        cx.make(ui.Padding{ .padding = .symmetric(16, 8), .child = cx.make(ui.Switch{
                             .value = b.show_system,
                             .on_changed = systemCallback(cx, b),
                             .label = "System files",
@@ -89,40 +83,40 @@ pub const Files = struct {
         // The path, and under it what the folder is for (if it is one of
         // the system's), or what the file shown holds.
         const file_path = b.filePath(cx.ui.arena());
-        const path_text = cx.make(ui.Text{ .text = file_path orelse b.path, .style = .{ .size = 20 * s }, .wrap = false, .ellipsis = true });
+        const path_text = cx.make(ui.Text{ .text = file_path orelse b.path, .style = .{ .size = 20 }, .wrap = false, .ellipsis = true });
         const description: ?[]const u8 = if (b.file) |*f| (if (f.err == null) viewer.describe(cx, f) else null) else fs.describe(b.path);
-        const about = if (description) |d| cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = @round(2 * s), .children = &.{
+        const about = if (description) |d| cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 2, .children = &.{
             path_text,
-            cx.make(ui.Text{ .text = d, .style = .{ .size = 15 * s, .color = t.on_surface_variant }, .wrap = false, .ellipsis = true }),
+            cx.make(ui.Text{ .text = d, .style = .{ .size = 15, .color = t.on_surface_variant }, .wrap = false, .ellipsis = true }),
         } }) else path_text;
-        const header = cx.make(ui.Padding{ .padding = .symmetric(@round(16 * s), @round(12 * s)), .child = cx.make(ui.Row{ .spacing = @round(16 * s), .children = &.{
+        const header = cx.make(ui.Padding{ .padding = .symmetric(16, 12), .child = cx.make(ui.Row{ .spacing = 16, .children = &.{
             cx.make(ui.OutlinedButton{ .label = "Up", .icon = .arrow_upward, .on_press = if (at_root) null else callback(cx, .{ .browser = b }, Act.up) }),
             cx.make(ui.Expanded{ .child = about }),
         } }) });
 
         const content = if (b.file) |*f|
-            viewer.view(cx, s, f, self.width - @round(300 * s) - 1).withKey(pathKey(file_path orelse ""))
+            viewer.view(cx, f, self.width - 300 - 1).withKey(pathKey(file_path orelse ""))
         else if (b.listing.err) |err|
-            message(cx, s, switch (err) {
+            message(cx, switch (err) {
                 error.AccessDenied => "You are not allowed to look in this folder",
                 error.NotFound => "This folder is not there any more",
                 else => "This folder cannot be opened",
             })
         else if (b.listing.entries.len == 0)
-            message(cx, s, "This folder is empty")
+            message(cx, "This folder is empty")
         else
             // Only the tiles that show are made (a folder can have a
             // thousand items). Another folder starts again at the top.
-            cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(@round(16 * s)), .child = cx.make(ui.LazyGrid{
+            cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(16), .child = cx.make(ui.LazyGrid{
                 .count = b.listing.entries.len,
-                .cell = .{ .w = @round(128 * s), .h = @round(124 * s) },
-                .spacing = @round(8 * s),
+                .cell = .{ .w = 128, .h = 124 },
+                .spacing = 8,
                 .item = .of(self, Files.tile),
             }) }) }).withKey(pathKey(b.path));
 
-        const footer = cx.make(ui.Padding{ .padding = .symmetric(@round(16 * s), @round(10 * s)), .child = cx.make(ui.Text{
+        const footer = cx.make(ui.Padding{ .padding = .symmetric(16, 10), .child = cx.make(ui.Text{
             .text = self.status(cx),
-            .style = .{ .size = 16 * s, .color = t.on_surface_variant },
+            .style = .{ .size = 16, .color = t.on_surface_variant },
             .wrap = false,
             .ellipsis = true,
         }) });
@@ -134,7 +128,6 @@ pub const Files = struct {
                 .on_maximize = self.on_maximize,
                 .on_drag = self.on_drag,
                 .maximized = self.maximized,
-                .scale = self.bar_scale,
             }),
             cx.make(ui.Expanded{ .child = cx.make(ui.Row{ .cross_axis_alignment = .stretch, .children = &.{
                 tree,
@@ -180,7 +173,6 @@ pub const Files = struct {
         return cx.make(Tile{
             .entry = b.listing.entries[i],
             .selected = b.selected == i,
-            .scale = self.scale,
             .on_press = callback(cx, .{ .browser = b, .index = i }, Act.activate),
         });
     }
@@ -237,7 +229,6 @@ const Tree = struct {
             .locked = item.locked,
             .home = item.depth == 0 and std.mem.eql(u8, item.path, b.home),
             .selected = selected,
-            .scale = t.files.scale,
             .on_open = callback(cx, .{ .browser = b, .path = item.path }, Act.open),
             .on_toggle = callback(cx, .{ .browser = b, .path = item.path }, Act.toggle),
         });
@@ -300,10 +291,10 @@ fn callback(cx: *ui.Context, act: Act, comptime f: fn (*const Act) void) ?ui.Cal
     return .of(p, f);
 }
 
-fn message(cx: *ui.Context, s: f32, text: []const u8) ui.Widget {
-    return cx.make(ui.Center{ .child = cx.make(ui.Padding{ .padding = .all(@round(24 * s)), .child = cx.make(ui.Text{
+fn message(cx: *ui.Context, text: []const u8) ui.Widget {
+    return cx.make(ui.Center{ .child = cx.make(ui.Padding{ .padding = .all(24), .child = cx.make(ui.Text{
         .text = text,
-        .style = .{ .size = 20 * s, .color = cx.theme().on_surface_variant },
+        .style = .{ .size = 20, .color = cx.theme().on_surface_variant },
         .text_align = .center,
     }) }) });
 }
@@ -325,7 +316,6 @@ pub const TreeRow = struct {
     /// The user's files: a house rather than a folder.
     home: bool = false,
     selected: bool,
-    scale: f32,
     on_open: ?ui.Callback,
     on_toggle: ?ui.Callback,
 
@@ -334,23 +324,22 @@ pub const TreeRow = struct {
     };
 
     pub fn build(self: *const TreeRow, cx: *ui.Context, state: *State) ui.Widget {
-        const s = self.scale;
         const t = cx.theme();
-        const height = @round(40 * s);
+        const height = 40;
         const highlight: ?gfx.Color = if (self.selected) t.secondary_container else if (state.interaction.hovered) t.on_surface.withAlpha(0.08) else null;
         const arrow = if (self.expandable)
-            cx.make(Disclosure{ .expanded = self.expanded, .size = @round(28 * s), .on_press = self.on_toggle })
+            cx.make(Disclosure{ .expanded = self.expanded, .size = 28, .on_press = self.on_toggle })
         else
-            cx.make(ui.SizedBox{ .width = @round(28 * s), .height = @round(28 * s) });
-        const icon = cx.make(FileIcon{ .kind = .folder, .icon = if (self.home) .home else null, .size = @round(24 * s) });
-        const name = cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = self.label, .style = .{ .size = 17 * s }, .wrap = false, .ellipsis = true }) });
+            cx.make(ui.SizedBox{ .width = 28, .height = 28 });
+        const icon = cx.make(FileIcon{ .kind = .folder, .icon = if (self.home) .home else null, .size = 24 });
+        const name = cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = self.label, .style = .{ .size = 17 }, .wrap = false, .ellipsis = true }) });
         return cx.make(ui.Pressable{ .on_press = self.on_open, .interaction = &state.interaction, .child = cx.make(ui.Decorated{
             .color = highlight,
             .radius = .all(height / 2),
             .child = cx.make(ui.SizedBox{ .height = height, .child = cx.make(ui.Padding{
-                .padding = .{ .left = @round(4 * s + @as(f32, @floatFromInt(@min(self.depth, 16))) * 18 * s), .right = @round(12 * s) },
-                .child = cx.make(ui.Row{ .spacing = @round(6 * s), .children = if (self.locked)
-                    &.{ arrow, icon, name, cx.make(ui.Icon{ .icon = .lock, .size = @round(18 * s), .color = t.on_surface_variant }) }
+                .padding = .{ .left = @round(4 + @as(f32, @floatFromInt(@min(self.depth, 16))) * 18), .right = 12 },
+                .child = cx.make(ui.Row{ .spacing = 6, .children = if (self.locked)
+                    &.{ arrow, icon, name, cx.make(ui.Icon{ .icon = .lock, .size = 18, .color = t.on_surface_variant }) }
                 else
                     &.{ arrow, icon, name } }),
             }) }),
@@ -387,7 +376,6 @@ const Disclosure = struct {
 pub const Tile = struct {
     entry: fs.Entry,
     selected: bool,
-    scale: f32,
     on_press: ?ui.Callback,
 
     pub const State = struct {
@@ -395,15 +383,14 @@ pub const Tile = struct {
     };
 
     pub fn build(self: *const Tile, cx: *ui.Context, state: *State) ui.Widget {
-        const s = self.scale;
         const t = cx.theme();
         const highlight: ?gfx.Color = if (self.selected) t.secondary_container else if (state.interaction.hovered) t.on_surface.withAlpha(0.08) else null;
         return cx.make(ui.Pressable{ .on_press = self.on_press, .interaction = &state.interaction, .child = cx.make(ui.Decorated{
             .color = highlight,
-            .radius = .all(@round(12 * s)),
-            .child = cx.make(ui.Padding{ .padding = .all(@round(8 * s)), .child = cx.make(ui.Column{ .spacing = @round(6 * s), .children = &.{
-                cx.make(ui.Expanded{ .child = cx.make(ui.Center{ .child = cx.make(FileIcon{ .kind = self.entry.kind, .link = self.entry.link, .locked = self.entry.kind == .folder and !self.entry.writable, .size = @round(64 * s) }) }) }),
-                cx.make(ui.Text{ .text = self.entry.name, .style = .{ .size = 15 * s }, .text_align = .center, .wrap = false, .ellipsis = true }),
+            .radius = .all(12),
+            .child = cx.make(ui.Padding{ .padding = .all(8), .child = cx.make(ui.Column{ .spacing = 6, .children = &.{
+                cx.make(ui.Expanded{ .child = cx.make(ui.Center{ .child = cx.make(FileIcon{ .kind = self.entry.kind, .link = self.entry.link, .locked = self.entry.kind == .folder and !self.entry.writable, .size = 64 }) }) }),
+                cx.make(ui.Text{ .text = self.entry.name, .style = .{ .size = 15 }, .text_align = .center, .wrap = false, .ellipsis = true }),
             } }) }),
         }) });
     }
@@ -487,17 +474,20 @@ fn click(u: *ui.Ui, n: *ui.Node) void {
     u.pointerButton(p, ui.btn_left, false);
 }
 
-/// The sizes the shell gives windows, and the size of a maximized one
-/// (which sets the scale): maximized and restored on a 1080p screen and a
-/// 720p one.
-const shell_sizes = [_][4]u32{
-    .{ 1920, 1036, 1920, 1036 },
-    .{ 960, 518, 1920, 1036 },
-    .{ 1280, 668, 1280, 668 },
-    .{ 640, 334, 1280, 668 },
+/// The sizes to lay out at: the smallest the window may be, as narrow
+/// and as short as it may be, a restored window's first size on a 1080p
+/// screen, and maximized on a 720p and a 1080p screen. Everything is the
+/// same size in pixels in each.
+const test_sizes = [_][2]u32{
+    min_size,
+    .{ min_size[0], 1036 },
+    .{ 1920, min_size[1] },
+    .{ 960, 518 },
+    .{ 1280, 668 },
+    .{ 1920, 1036 },
 };
 
-test "the tree and the grid fit, at the shell's sizes" {
+test "the tree and the grid fit, from the smallest window to the biggest" {
     var t: fs.TestTree = .{};
     try t.init();
     defer t.deinit();
@@ -506,8 +496,8 @@ test "the tree and the grid fit, at the shell's sizes" {
     const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
     const u = try ui.Ui.create(testing.allocator, &f);
     defer u.destroy();
-    for (shell_sizes) |size| {
-        u.frame(size[0], size[1], 0, Files{ .browser = &b, .scale = scaleFor(size[2], size[3]), .bar_scale = @as(f32, @floatFromInt(size[2])) / 1920 });
+    for (test_sizes) |size| {
+        u.frame(size[0], size[1], 0, Files{ .browser = &b });
         try testing.expect(!overflows(u.root.?));
     }
     // The tree: home and its folders, and nothing above it; the switch for
@@ -518,8 +508,8 @@ test "the tree and the grid fit, at the shell's sizes" {
     try testing.expect(findText(u.root.?, "System files") != null);
     // Fits with them shown, too.
     try b.showSystem(true);
-    for (shell_sizes) |size| {
-        u.frame(size[0], size[1], 0, Files{ .browser = &b, .scale = scaleFor(size[2], size[3]), .bar_scale = @as(f32, @floatFromInt(size[2])) / 1920 });
+    for (test_sizes) |size| {
+        u.frame(size[0], size[1], 0, Files{ .browser = &b });
         try testing.expect(!overflows(u.root.?));
     }
     // The grid, and how many items there are.
@@ -530,8 +520,8 @@ test "the tree and the grid fit, at the shell's sizes" {
     b.request(.{ .activate = 2 });
     _ = b.apply();
     try testing.expect(b.file.?.kind == .text);
-    for (shell_sizes) |size| {
-        u.frame(size[0], size[1], 0, Files{ .browser = &b, .scale = scaleFor(size[2], size[3]), .bar_scale = @as(f32, @floatFromInt(size[2])) / 1920, .width = @floatFromInt(size[0]) });
+    for (test_sizes) |size| {
+        u.frame(size[0], size[1], 0, Files{ .browser = &b, .width = @floatFromInt(size[0]) });
         try testing.expect(!overflows(u.root.?));
     }
     try b.showSystem(true);
@@ -539,8 +529,8 @@ test "the tree and the grid fit, at the shell's sizes" {
     for (b.listing.entries, 0..) |e, i| if (std.mem.eql(u8, e.name, "auxv")) b.request(.{ .activate = i });
     _ = b.apply();
     try testing.expect(b.file.?.kind == .binary);
-    for (shell_sizes) |size| {
-        u.frame(size[0], size[1], 0, Files{ .browser = &b, .scale = scaleFor(size[2], size[3]), .bar_scale = @as(f32, @floatFromInt(size[2])) / 1920, .width = @floatFromInt(size[0]) });
+    for (test_sizes) |size| {
+        u.frame(size[0], size[1], 0, Files{ .browser = &b, .width = @floatFromInt(size[0]) });
         try testing.expect(!overflows(u.root.?));
         try testing.expect(findType(u.root.?, viewer.HexRow) != null);
     }
@@ -549,11 +539,11 @@ test "the tree and the grid fit, at the shell's sizes" {
 
     // Folders that cannot be changed have a lock, in the tree and the grid.
     try b.showSystem(false);
-    u.frame(1600, 900, 0, Files{ .browser = &b, .scale = 1 });
+    u.frame(1600, 900, 0, Files{ .browser = &b });
     try testing.expect(findIcon(u.root.?, .lock) == null);
     b.listing.entries[0].writable = false;
     b.expanded.getPtr(t.path).?.entries[0].writable = false;
-    u.frame(1600, 900, 0, Files{ .browser = &b, .scale = 1 });
+    u.frame(1600, 900, 0, Files{ .browser = &b });
     try testing.expect(findIcon(up(findText(u.root.?, "A-folder").?, TreeRow).?, .lock) != null);
     try testing.expect(findIcon(up(findText(u.root.?, "z-link").?, TreeRow).?, .lock) == null);
     try testing.expect(findIcon(tile(u, "A-folder").?, .lock) != null);
@@ -575,7 +565,7 @@ test "clicking in the grid and the tree" {
         fn draw(uu: *ui.Ui, bb: *Browser, n: *u64) void {
             _ = bb.apply();
             n.* += 1;
-            uu.frame(1600, 900, n.*, Files{ .browser = bb, .scale = 1 });
+            uu.frame(1600, 900, n.*, Files{ .browser = bb });
         }
     }.draw;
     Frame(u, &b, &now);

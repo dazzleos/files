@@ -16,18 +16,18 @@ const fs = @import("fs.zig");
 const Content = content.Content;
 
 /// What is in `c`, at scale `s`, `width` wide.
-pub fn view(cx: *ui.Context, s: f32, c: *const Content, width: f32) ui.Widget {
-    if (c.err) |err| return message(cx, s, switch (err) {
+pub fn view(cx: *ui.Context, c: *const Content, width: f32) ui.Widget {
+    if (c.err) |err| return message(cx, switch (err) {
         error.AccessDenied => "You are not allowed to read this file",
         error.NotFound => "This file is not there any more",
         else => "This file cannot be read",
     });
     return switch (c.kind) {
-        .empty => message(cx, s, "This file is empty"),
-        .text => |lines| textView(cx, s, lines),
-        .image => |*img| cx.make(ui.Padding{ .padding = .all(@round(16 * s)), .child = cx.make(ui.Center{ .child = cx.make(ui.Image{ .image = &img.image }) }) }),
-        .font => |*f| fontView(cx, s, f),
-        .binary => hexView(cx, s, c.data, width),
+        .empty => message(cx, "This file is empty"),
+        .text => |lines| textView(cx, lines),
+        .image => |*img| cx.make(ui.Padding{ .padding = .all(16), .child = cx.make(ui.Center{ .child = cx.make(ui.Image{ .image = &img.image }) }) }),
+        .font => |*f| fontView(cx, f),
+        .binary => hexView(cx, c.data, width),
     };
 }
 
@@ -48,10 +48,10 @@ pub fn describe(cx: *ui.Context, c: *const Content) []const u8 {
     };
 }
 
-fn message(cx: *ui.Context, s: f32, text: []const u8) ui.Widget {
-    return cx.make(ui.Center{ .child = cx.make(ui.Padding{ .padding = .all(@round(24 * s)), .child = cx.make(ui.Text{
+fn message(cx: *ui.Context, text: []const u8) ui.Widget {
+    return cx.make(ui.Center{ .child = cx.make(ui.Padding{ .padding = .all(24), .child = cx.make(ui.Text{
         .text = text,
-        .style = .{ .size = 20 * s, .color = cx.theme().on_surface_variant },
+        .style = .{ .size = 20, .color = cx.theme().on_surface_variant },
         .text_align = .center,
     }) }) });
 }
@@ -61,21 +61,20 @@ fn message(cx: *ui.Context, s: f32, text: []const u8) ui.Widget {
 /// Lines, for the list to make rows of (made in the frame's arena).
 const Lines = struct {
     lines: []const []const u8,
-    s: f32,
 
     fn row(l: *const Lines, cx: *ui.Context, i: usize) ui.Widget {
         // Long lines end in "…" (they are not wrapped: rows are all one
         // height).
-        return cx.make(ui.Text{ .text = l.lines[i], .style = .{ .size = 16 * l.s }, .wrap = false, .ellipsis = true });
+        return cx.make(ui.Text{ .text = l.lines[i], .style = .{ .size = 16 }, .wrap = false, .ellipsis = true });
     }
 };
 
-fn textView(cx: *ui.Context, s: f32, lines: []const []const u8) ui.Widget {
+fn textView(cx: *ui.Context, lines: []const []const u8) ui.Widget {
     const l = cx.ui.arena().create(Lines) catch return cx.make(ui.Empty{});
-    l.* = .{ .lines = lines, .s = s };
-    return cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(@round(16 * s)), .child = cx.make(ui.LazyGrid{
+    l.* = .{ .lines = lines };
+    return cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(16), .child = cx.make(ui.LazyGrid{
         .count = lines.len,
-        .cell = .{ .w = std.math.inf(f32), .h = @round(22 * s) },
+        .cell = .{ .w = std.math.inf(f32), .h = 22 },
         .item = .of(l, Lines.row),
     }) }) });
 }
@@ -89,21 +88,21 @@ const samples = [_][]const u8{
     "0123456789 !?&@#%()[]{}",
 };
 
-fn fontView(cx: *ui.Context, s: f32, f: *const font.Font) ui.Widget {
+fn fontView(cx: *ui.Context, f: *const font.Font) ui.Widget {
     const a = cx.ui.arena();
     var rows: std.ArrayList(ui.Widget) = .empty;
-    for (samples) |sample| rows.append(a, cx.make(ui.Text{ .text = sample, .style = .{ .size = 28 * s, .font = f } })) catch {};
+    for (samples) |sample| rows.append(a, cx.make(ui.Text{ .text = sample, .style = .{ .size = 28, .font = f } })) catch {};
     // The first sample at sizes from small to big.
     for ([_]f32{ 12, 18, 24, 36, 48, 72 }) |size| {
-        rows.append(a, cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = @round(2 * s), .children = &.{
-            cx.make(ui.Text{ .text = cx.fmt("{d} pixels", .{size}), .style = .{ .size = 14 * s, .color = cx.theme().on_surface_variant } }),
-            cx.make(ui.Text{ .text = samples[0], .style = .{ .size = size * s, .font = f }, .wrap = false, .ellipsis = true }),
+        rows.append(a, cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 2, .children = &.{
+            cx.make(ui.Text{ .text = cx.fmt("{d} pixels", .{size}), .style = .{ .size = 14, .color = cx.theme().on_surface_variant } }),
+            cx.make(ui.Text{ .text = samples[0], .style = .{ .size = size, .font = f }, .wrap = false, .ellipsis = true }),
         } })) catch {};
     }
-    return cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(@round(24 * s)), .child = cx.make(ui.Column{
+    return cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(24), .child = cx.make(ui.Column{
         .cross_axis_alignment = .stretch,
         .main_axis_size = .min,
-        .spacing = @round(16 * s),
+        .spacing = 16,
         .children = rows.items,
     }) }) });
 }
@@ -123,10 +122,10 @@ const Bytes = struct {
     }
 };
 
-fn hexView(cx: *ui.Context, s: f32, data: []const u8, width: f32) ui.Widget {
+fn hexView(cx: *ui.Context, data: []const u8, width: f32) ui.Widget {
     const b = cx.ui.arena().create(Bytes) catch return cx.make(ui.Empty{});
-    const size = @round(15 * s);
-    const pad = @round(16 * s);
+    const size = 15;
+    const pad = 16;
     // As many bytes a row as fit (beside the scroll bar).
     var pitch: Pitch = .of(cx.ui.font, size);
     for ([_]usize{ 16, 8, 4 }) |n| {
@@ -136,7 +135,7 @@ fn hexView(cx: *ui.Context, s: f32, data: []const u8, width: f32) ui.Widget {
     b.* = .{ .data = data, .size = size, .pitch = pitch };
     return cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(pad), .child = cx.make(ui.LazyGrid{
         .count = (data.len + pitch.per_row - 1) / pitch.per_row,
-        .cell = .{ .w = std.math.inf(f32), .h = @round(22 * s) },
+        .cell = .{ .w = std.math.inf(f32), .h = 22 },
         .item = .of(b, Bytes.row),
     }) }) });
 }
