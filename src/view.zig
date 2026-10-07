@@ -42,7 +42,7 @@ pub const Files = struct {
         // The folders in the tree; rows are made only for those that show.
         var items: std.ArrayList(TreeItem) = .empty;
         const root = b.root();
-        self.treeItems(cx, &items, root, if (std.mem.eql(u8, root, b.home)) "Home" else root, null, !fs.writable(root), 0);
+        self.treeItems(cx, &items, root, if (std.mem.eql(u8, root, b.user_files)) "User files" else root, null, !fs.writable(root), 0);
         const open_row: ?usize = for (items.items, 0..) |item, i| {
             if (std.mem.eql(u8, item.path, b.path)) break i;
         } else null;
@@ -227,7 +227,7 @@ const Tree = struct {
             .expanded = item.expanded,
             .expandable = item.expandable,
             .locked = item.locked,
-            .home = item.depth == 0 and std.mem.eql(u8, item.path, b.home),
+            .user_files = item.depth == 0 and std.mem.eql(u8, item.path, b.user_files),
             .selected = selected,
             .on_open = callback(cx, .{ .browser = b, .path = item.path }, Act.open),
             .on_toggle = callback(cx, .{ .browser = b, .path = item.path }, Act.toggle),
@@ -314,7 +314,7 @@ pub const TreeRow = struct {
     expandable: bool = true,
     locked: bool = false,
     /// The user's files: a house rather than a folder.
-    home: bool = false,
+    user_files: bool = false,
     selected: bool,
     on_open: ?ui.Callback,
     on_toggle: ?ui.Callback,
@@ -331,7 +331,7 @@ pub const TreeRow = struct {
             cx.make(Disclosure{ .expanded = self.expanded, .size = 28, .on_press = self.on_toggle })
         else
             cx.make(ui.SizedBox{ .width = 28, .height = 28 });
-        const icon = cx.make(FileIcon{ .kind = .folder, .icon = if (self.home) .home else null, .size = 24 });
+        const icon = cx.make(FileIcon{ .kind = .folder, .icon = if (self.user_files) .person else null, .size = 24 });
         const name = cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = self.label, .style = .{ .size = 17 }, .wrap = false, .ellipsis = true }) });
         return cx.make(ui.Pressable{ .on_press = self.on_open, .interaction = &state.interaction, .child = cx.make(ui.Decorated{
             .color = highlight,
@@ -500,9 +500,9 @@ test "the tree and the grid fit, from the smallest window to the biggest" {
         u.frame(size[0], size[1], 0, Files{ .browser = &b });
         try testing.expect(!overflows(u.root.?));
     }
-    // The tree: home and its folders, and nothing above it; the switch for
+    // The tree: the user's files and its folders, and nothing above it; the switch for
     // the system's files.
-    try testing.expect(findText(u.root.?, "Home") != null);
+    try testing.expect(findText(u.root.?, "User files") != null);
     try testing.expect(findText(u.root.?, "z-link") != null);
     try testing.expect(findText(u.root.?, "tmp") == null);
     try testing.expect(findText(u.root.?, "System files") != null);
@@ -534,7 +534,7 @@ test "the tree and the grid fit, from the smallest window to the biggest" {
         try testing.expect(!overflows(u.root.?));
         try testing.expect(findType(u.root.?, viewer.HexRow) != null);
     }
-    // Back home, the folder.
+    // Back to the user's files, the folder.
     try b.showSystem(false);
 
     // Folders that cannot be changed have a lock, in the tree and the grid.
@@ -592,7 +592,7 @@ test "clicking in the grid and the tree" {
     try testing.expect(std.mem.endsWith(u8, b.path, "/A-folder"));
     try testing.expect(findText(u.root.?, "This folder is empty") != null);
 
-    // Up goes back, as far as home (where it is disabled).
+    // Up goes back, as far as the user's files (where it is disabled).
     click(u, up(findText(u.root.?, "Up").?, ui.OutlinedButton).?);
     Frame(u, &b, &now);
     try testing.expectEqualStrings(t.path, b.path);
@@ -602,16 +602,16 @@ test "clicking in the grid and the tree" {
     try testing.expect(findDisclosure(up(findText(u.root.?, "A-folder").?, TreeRow).?) == null);
     try testing.expect(findDisclosure(up(findText(u.root.?, "z-link").?, TreeRow).?) == null);
 
-    // The arrow closes home in the tree (its folders go).
-    const home_row = up(findText(u.root.?, "Home").?, TreeRow).?;
-    try testing.expect(findText(home_row.parent.?, "z-link") != null);
-    click(u, findDisclosure(home_row).?);
+    // The arrow closes the user's files in the tree (its folders go).
+    const user_row = up(findText(u.root.?, "User files").?, TreeRow).?;
+    try testing.expect(findText(user_row.parent.?, "z-link") != null);
+    click(u, findDisclosure(user_row).?);
     Frame(u, &b, &now);
     try testing.expect(!b.isExpanded(t.path));
-    try testing.expect(findText(up(findText(u.root.?, "Home").?, ui.ScrollView).?, "z-link") == null);
+    try testing.expect(findText(up(findText(u.root.?, "User files").?, ui.ScrollView).?, "z-link") == null);
 
     // The switch shows the system's files: the tree starts at /, and a
-    // folder above home opens.
+    // folder above the user's files opens.
     click(u, up(findText(u.root.?, "System files").?, ui.Switch).?);
     Frame(u, &b, &now);
     try testing.expect(b.show_system);
@@ -639,7 +639,7 @@ test "clicking in the grid and the tree" {
     Frame(u, &b, &now);
     try testing.expect(findText(u.root.?, "Everything on this computer") != null);
     try testing.expect(!overflows(u.root.?));
-    // Off again: back home.
+    // Off again: back to the user's files.
     click(u, up(findText(u.root.?, "System files").?, ui.Switch).?);
     Frame(u, &b, &now);
     try testing.expect(!b.show_system);

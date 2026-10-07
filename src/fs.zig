@@ -152,7 +152,6 @@ pub fn describe(path: []const u8) ?[]const u8 {
 
 const descriptions = [_]struct { []const u8, []const u8 }{
     .{ "/", "Everything on this computer" },
-    .{ "/apps", "The apps you can open" },
     .{ "/os", "Dazzle itself: what makes the computer work" },
     .{ "/os/shell", "The desktop, and the apps that are part of it" },
     .{ "/os/firmware", "Programs that run inside hardware, like the Wi-Fi adapter" },
@@ -161,6 +160,8 @@ const descriptions = [_]struct { []const u8, []const u8 }{
     .{ sys.system.data_dir, "The SD card's space for files and settings" },
     .{ sys.system.config_dir, "This computer's settings" },
     .{ sys.system.user_dir, "Your files" },
+    .{ sys.system.apps_dir, "The apps you have installed" },
+    .{ sys.system.update_dir, "Updates of Dazzle, while they are installed" },
     .{ "/dev", "The devices in this computer" },
     .{ "/dev/dri", "The graphics processor" },
     .{ "/dev/input", "Keyboards, mice and other ways of controlling the computer" },

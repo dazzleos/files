@@ -64,8 +64,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     window_ui.clipboard = .of(&win.clipboard);
     try window_ui.attachGpu(dev);
 
-    // The user's files: the SD card's space for them.
-    var browser = try browser_mod.Browser.init(gpa, sys.system.data_dir);
+    // The user's files, on the SD card.
+    var browser = try browser_mod.Browser.init(gpa, sys.system.user_dir);
     defer browser.deinit();
 
     // What the title bar's buttons do, and how small the window may be.

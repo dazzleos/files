@@ -2,7 +2,7 @@
 //! item picked in it (and what is in it, if it is a file: see
 //! content.zig), and the folders opened in the tree (with the folders
 //! in each, read when it is opened). Everything is within a root: the
-//! user's files (`home`: /data, the SD card's space for them) unless the
+//! user's files (`user_files`: /data/user, on the SD card) unless the
 //! system's files are shown too, when it is /; nothing above it is opened.
 //!
 //! The window's widgets ask for changes (`request`); they are made between
@@ -32,8 +32,8 @@ pub const Action = union(enum) {
 pub const Browser = struct {
     gpa: std.mem.Allocator,
     /// Where the user's files are, and where the window starts.
-    home: []const u8,
-    /// The system's files are shown too: the root is / rather than `home`.
+    user_files: []const u8,
+    /// The system's files are shown too: the root is / rather than `user_files`.
     show_system: bool = false,
     /// The open folder.
     path: []u8,
@@ -48,17 +48,17 @@ pub const Browser = struct {
     pending: ?Action = null,
     pending_path: std.ArrayList(u8) = .empty,
 
-    /// Starts at `home` (which must last as long as the browser), showing
+    /// Starts at `user_files` (which must last as long as the browser), showing
     /// only what is in it.
-    pub fn init(gpa: std.mem.Allocator, home: []const u8) !Browser {
-        var b: Browser = .{ .gpa = gpa, .home = home, .path = try gpa.dupe(u8, home), .listing = fs.Listing.read(gpa, home) };
-        try b.expand(home);
+    pub fn init(gpa: std.mem.Allocator, user_files: []const u8) !Browser {
+        var b: Browser = .{ .gpa = gpa, .user_files = user_files, .path = try gpa.dupe(u8, user_files), .listing = fs.Listing.read(gpa, user_files) };
+        try b.expand(user_files);
         return b;
     }
 
     /// The folder at the top of the tree; nothing above it is opened.
     pub fn root(b: *const Browser) []const u8 {
-        return if (b.show_system) "/" else b.home;
+        return if (b.show_system) "/" else b.user_files;
     }
 
     pub fn atRoot(b: *const Browser) bool {
@@ -107,12 +107,12 @@ pub const Browser = struct {
         return true;
     }
 
-    /// Shows the system's files too, or only the user's (going home if the
+    /// Shows the system's files too, or only the user's (going back to the user's files if the
     /// open folder is not among them).
     pub fn showSystem(b: *Browser, on: bool) !void {
         b.show_system = on;
         try b.expand(b.root());
-        if (!fs.within(b.path, b.root())) try b.open(b.home) else try b.expandTo(b.path);
+        if (!fs.within(b.path, b.root())) try b.open(b.user_files) else try b.expandTo(b.path);
     }
 
     /// Shows the folder at `path` (if it is within the root), opening the
@@ -204,7 +204,7 @@ pub const Browser = struct {
 
 const testing = std.testing;
 
-test "opening folders, from the tree and the grid, and going up as far as home" {
+test "opening folders, from the tree and the grid, and going up as far as the user's files" {
     var t: fs.TestTree = .{};
     try t.init();
     defer t.deinit();
@@ -236,7 +236,7 @@ test "opening folders, from the tree and the grid, and going up as far as home" 
     try testing.expectEqual(@as(usize, 0), b.listing.entries.len);
     try testing.expect(!b.apply());
 
-    // Up, as far as home and no further; nothing outside it opens.
+    // Up, as far as the user's files and no further; nothing outside it opens.
     b.request(.up);
     _ = b.apply();
     try testing.expectEqualStrings(t.path, b.path);
@@ -257,7 +257,7 @@ test "opening folders, from the tree and the grid, and going up as far as home" 
     _ = b.apply();
     try testing.expect(b.isExpanded(t.path));
 
-    // With the system's files, the root is /: up leaves home, and the
+    // With the system's files, the root is /: up leaves the user's files, and the
     // folders above what is opened are open in the tree.
     b.request(.{ .show_system = true });
     _ = b.apply();
@@ -266,12 +266,12 @@ test "opening folders, from the tree and the grid, and going up as far as home" 
     b.request(.up);
     _ = b.apply();
     try testing.expectEqualStrings("/tmp", b.path);
-    // Without them again, it goes home.
+    // Without them again, it goes back to the user's files.
     b.request(.{ .show_system = false });
     _ = b.apply();
     try testing.expectEqualStrings(t.path, b.path);
     try testing.expectEqualStrings(t.path, b.root());
-    // From inside home it stays where it is.
+    // From inside the user's files it stays where it is.
     var sub_buf: [128]u8 = undefined;
     const sub = try std.fmt.bufPrint(&sub_buf, "{s}/A-folder", .{t.path});
     b.request(.{ .open = sub });
