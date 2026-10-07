@@ -329,39 +329,7 @@ pub fn formatSize(buf: []u8, size: u64) []const u8 {
     return std.fmt.bufPrint(buf, "{d:.1} {s}", .{ v, units[i] }) catch "";
 }
 
-/// When something was changed, for people, against `now` (both in seconds
-/// since 1970, in UTC, the only time the system has): "Today, 10:32",
-/// "Yesterday, 18:05", "7 Oct" this year, else "7 Oct 2025".
-pub fn formatTime(buf: []u8, secs: i64, now: i64) []const u8 {
-    if (secs <= 0) return "";
-    const months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-    const day_secs = std.time.s_per_day;
-    const day = @divFloor(secs, day_secs);
-    const today = @divFloor(now, day_secs);
-    const in_day: u64 = @intCast(@mod(secs, day_secs));
-    if (day == today or day == today - 1)
-        return std.fmt.bufPrint(buf, "{s}, {d:0>2}:{d:0>2}", .{ if (day == today) "Today" else "Yesterday", in_day / 3600, in_day / 60 % 60 }) catch "";
-    const date = (std.time.epoch.EpochDay{ .day = @intCast(day) }).calculateYearDay();
-    const md = date.calculateMonthDay();
-    const this_year = (std.time.epoch.EpochDay{ .day = @intCast(@max(today, 0)) }).calculateYearDay().year;
-    const month = months[@intFromEnum(md.month) - 1];
-    if (date.year == this_year) return std.fmt.bufPrint(buf, "{d} {s}", .{ md.day_index + 1, month }) catch "";
-    return std.fmt.bufPrint(buf, "{d} {s} {d}", .{ md.day_index + 1, month, date.year }) catch "";
-}
-
 const testing = std.testing;
-
-test "times, for people" {
-    var buf: [32]u8 = undefined;
-    // 2026-10-07 10:32 UTC.
-    const now: i64 = 1791331200 + 10 * 3600 + 32 * 60;
-    try testing.expectEqualStrings("Today, 10:32", formatTime(&buf, now, now));
-    try testing.expectEqualStrings("Today, 00:00", formatTime(&buf, 1791331200, now));
-    try testing.expectEqualStrings("Yesterday, 18:05", formatTime(&buf, 1791331200 - 6 * 3600 + 5 * 60, now));
-    try testing.expectEqualStrings("1 Jan", formatTime(&buf, 1767225600, now));
-    try testing.expectEqualStrings("31 Dec 2025", formatTime(&buf, 1767225600 - 60, now));
-    try testing.expectEqualStrings("", formatTime(&buf, 0, now));
-}
 
 test "the newest first, folders still first" {
     var l: Listing = .{ .arena = .init(testing.allocator) };

@@ -11,6 +11,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
+const locale = @import("locale");
 const font = @import("font");
 const vc4 = @import("vc4");
 const app = @import("app");
@@ -54,6 +55,8 @@ pub fn main(init: std.process.Init.Minimal) u8 {
 }
 
 fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
+    // The language chosen (in setup, or Settings).
+    locale.current = locale.load().language;
     const gpa = std.heap.page_allocator;
     var dev = vc4.device.openRender() catch |err| {
         print("dazzle-files: no GPU ({s})\n", .{@errorName(err)});
@@ -114,6 +117,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             if (suspended) win.releaseSpareBuffers() else dirty = true;
         }
         const now = sys.nowNs();
+        // The keyboard's layout, as the shell says.
+        window_ui.keyboard = win.layout;
         for (win.takeInput()) |e| switch (e) {
             .motion => |pos| window_ui.pointerMotion(pos),
             .button => |b| window_ui.pointerButton(b.pos, b.code, b.pressed),

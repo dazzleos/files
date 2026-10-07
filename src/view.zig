@@ -27,6 +27,7 @@
 const std = @import("std");
 const ui = @import("ui");
 const sys = @import("sys");
+const locale = @import("locale");
 const gfx = @import("gfx");
 const fs = @import("fs.zig");
 const browser_mod = @import("browser.zig");
@@ -248,7 +249,7 @@ pub const Files = struct {
             .index = i,
             .on_drop = itemDrop(cx, b, i),
             .entry = e,
-            .modified = if (self.showModified()) cx.fmt("{s}", .{fs.formatTime(&time_buf, e.modified, self.now)}) else null,
+            .modified = if (self.showModified()) cx.fmt("{s}", .{locale.formatWhen(&time_buf, e.modified, self.now)}) else null,
             .size = if (e.kind == .file or e.kind == .program) cx.fmt("{s}", .{fs.formatSize(&size_buf, e.size)}) else "",
             .selected = b.selected == i,
             .on_press = callback(cx, .{ .browser = b, .index = i }, Act.activate),
