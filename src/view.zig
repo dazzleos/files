@@ -1,11 +1,13 @@
 //! The Files window, as widgets: the title bar, and under it the tree of
 //! folders on the left and the open folder on the right: its path (with a
-//! button to go up), what is in it as a grid of icons, and a line about the
-//! item picked (or how many there are). The tree and the grid scroll.
+//! button to go up, and buttons for the order of its items and how they
+//! are shown), what is in it as a grid of icons or a list (with when each
+//! was changed, and its size), and a line about the item picked (or how
+//! many there are). The tree and the items scroll.
 //!
-//! Clicking a folder in the tree or the grid opens it; the arrow beside a
-//! folder in the tree opens or closes it there. Clicking anything else in
-//! the grid picks it.
+//! Clicking a folder in the tree or among the items opens it; the arrow
+//! beside a folder in the tree opens or closes it there. Clicking anything
+//! else among the items picks it.
 
 const std = @import("std");
 const ui = @import("ui");
@@ -15,6 +17,7 @@ const browser_mod = @import("browser.zig");
 const viewer = @import("viewer.zig");
 
 const Browser = browser_mod.Browser;
+const Layout = browser_mod.Layout;
 
 /// The smallest the window may be: the tree, and two columns of the
 /// grid beside it. Everything is the same size in pixels whatever the
@@ -34,6 +37,9 @@ pub const Files = struct {
     maximized: bool = true,
     /// The window's width (a file's bytes are shown as many a row as fit).
     width: f32 = 1600,
+    /// The time now, in seconds since 1970 (when items were changed is
+    /// shown against it).
+    now: i64 = 0,
 
     pub fn build(self: *const Files, cx: *ui.Context) ui.Widget {
         const t = cx.theme();
@@ -89,9 +95,26 @@ pub const Files = struct {
             path_text,
             cx.make(ui.Text{ .text = d, .style = .{ .size = 15, .color = t.on_surface_variant }, .wrap = false, .ellipsis = true }),
         } }) else path_text;
+        // The order of the items and how they are shown, each a button
+        // saying which, that changes it (not while a file is shown); in a
+        // narrow window, by their icons alone.
+        const folder = b.file == null;
+        const labels = self.width >= 1000;
+        const order_button = cx.make(ui.OutlinedButton{
+            .label = if (!labels) "" else if (b.order == .name) "Name" else "Newest",
+            .icon = if (b.order == .name) .sort_by_alpha else .schedule,
+            .on_press = if (folder) callback(cx, .{ .browser = b }, Act.reorder) else null,
+        });
+        const layout_button = cx.make(ui.OutlinedButton{
+            .label = if (!labels) "" else if (b.layout == .icons) "Icons" else "List",
+            .icon = if (b.layout == .icons) .grid_view else .view_list,
+            .on_press = if (folder) callback(cx, .{ .browser = b }, Act.relayout) else null,
+        });
         const header = cx.make(ui.Padding{ .padding = .symmetric(16, 12), .child = cx.make(ui.Row{ .spacing = 16, .children = &.{
             cx.make(ui.OutlinedButton{ .label = "Up", .icon = .arrow_upward, .on_press = if (at_root) null else callback(cx, .{ .browser = b }, Act.up) }),
             cx.make(ui.Expanded{ .child = about }),
+            order_button,
+            layout_button,
         } }) });
 
         const content = if (b.file) |*f|
@@ -104,15 +127,26 @@ pub const Files = struct {
             })
         else if (b.listing.entries.len == 0)
             message(cx, "This folder is empty")
-        else
-            // Only the tiles that show are made (a folder can have a
-            // thousand items). Another folder starts again at the top.
-            cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(16), .child = cx.make(ui.LazyGrid{
+        else switch (b.layout) {
+            // Only the tiles or rows that show are made (a folder can have
+            // a thousand items). Another folder, or the other layout,
+            // starts again at the top.
+            .icons => cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(16), .child = cx.make(ui.LazyGrid{
                 .count = b.listing.entries.len,
                 .cell = .{ .w = 128, .h = 124 },
                 .spacing = 8,
                 .item = .of(self, Files.tile),
-            }) }) }).withKey(pathKey(b.path));
+            }) }) }).withKey(pathKey(b.path)),
+            .list => cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
+                listHeader(cx, self.showModified()),
+                divider(cx, .horizontal),
+                cx.make(ui.Expanded{ .child = cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .symmetric(8, 4), .child = cx.make(ui.LazyGrid{
+                    .count = b.listing.entries.len,
+                    .cell = .{ .w = std.math.inf(f32), .h = list_row_height },
+                    .item = .of(self, Files.listRow),
+                }) }) }).withKey(pathKey(b.path) +% 1) }),
+            } }),
+        };
 
         const footer = cx.make(ui.Padding{ .padding = .symmetric(16, 10), .child = cx.make(ui.Text{
             .text = self.status(cx),
@@ -172,6 +206,27 @@ pub const Files = struct {
         const b = self.browser;
         return cx.make(Tile{
             .entry = b.listing.entries[i],
+            .selected = b.selected == i,
+            .on_press = callback(cx, .{ .browser = b, .index = i }, Act.activate),
+        });
+    }
+
+    /// Whether the list has room for when items were changed (the names
+    /// come first).
+    fn showModified(self: *const Files) bool {
+        return self.width >= 900;
+    }
+
+    /// The list's row for the open folder's item `i`.
+    fn listRow(self: *const Files, cx: *ui.Context, i: usize) ui.Widget {
+        const b = self.browser;
+        const e = b.listing.entries[i];
+        var size_buf: [32]u8 = undefined;
+        var time_buf: [32]u8 = undefined;
+        return cx.make(ListRow{
+            .entry = e,
+            .modified = if (self.showModified()) cx.fmt("{s}", .{fs.formatTime(&time_buf, e.modified, self.now)}) else null,
+            .size = if (e.kind == .file or e.kind == .program) cx.fmt("{s}", .{fs.formatSize(&size_buf, e.size)}) else "",
             .selected = b.selected == i,
             .on_press = callback(cx, .{ .browser = b, .index = i }, Act.activate),
         });
@@ -272,6 +327,14 @@ const Act = struct {
 
     fn up(a: *const Act) void {
         a.browser.request(.up);
+    }
+
+    fn reorder(a: *const Act) void {
+        a.browser.request(.{ .order = if (a.browser.order == .name) .newest else .name });
+    }
+
+    fn relayout(a: *const Act) void {
+        a.browser.request(.{ .layout = if (a.browser.layout == .icons) .list else .icons });
     }
 };
 
@@ -396,6 +459,53 @@ pub const Tile = struct {
     }
 };
 
+const list_row_height = 40;
+/// The list's columns' widths, after the name's.
+const modified_width = 140;
+const size_width = 90;
+
+/// The list's column titles.
+fn listHeader(cx: *ui.Context, modified: bool) ui.Widget {
+    const style: ui.TextStyle = .{ .size = 14, .color = cx.theme().on_surface_variant };
+    return cx.make(ui.Padding{ .padding = .symmetric(20, 8), .child = cx.make(ui.Row{ .spacing = 12, .children = &.{
+        cx.make(ui.SizedBox{ .width = 24 }),
+        cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = "Name", .style = style, .wrap = false, .ellipsis = true }) }),
+        if (modified) cx.make(ui.SizedBox{ .width = modified_width, .child = cx.make(ui.Text{ .text = "Modified", .style = style, .wrap = false }) }) else cx.make(ui.Empty{}),
+        cx.make(ui.SizedBox{ .width = size_width, .child = cx.make(ui.Text{ .text = "Size", .style = style, .wrap = false, .text_align = .end }) }),
+    } }) });
+}
+
+/// An item in the list: its icon, name, when it was changed (if there is
+/// room) and its size (for files); pressing it does what pressing its tile
+/// does.
+pub const ListRow = struct {
+    entry: fs.Entry,
+    modified: ?[]const u8,
+    size: []const u8,
+    selected: bool,
+    on_press: ?ui.Callback,
+
+    pub const State = struct {
+        interaction: ui.Interaction = .{},
+    };
+
+    pub fn build(self: *const ListRow, cx: *ui.Context, state: *State) ui.Widget {
+        const t = cx.theme();
+        const highlight: ?gfx.Color = if (self.selected) t.secondary_container else if (state.interaction.hovered) t.on_surface.withAlpha(0.08) else null;
+        const detail: ui.TextStyle = .{ .size = 15, .color = t.on_surface_variant };
+        return cx.make(ui.Pressable{ .on_press = self.on_press, .interaction = &state.interaction, .child = cx.make(ui.Decorated{
+            .color = highlight,
+            .radius = .all(list_row_height / 2),
+            .child = cx.make(ui.Padding{ .padding = .symmetric(12, 0), .child = cx.make(ui.Row{ .spacing = 12, .cross_axis_alignment = .center, .children = &.{
+                cx.make(FileIcon{ .kind = self.entry.kind, .link = self.entry.link, .locked = self.entry.kind == .folder and !self.entry.writable, .size = 24 }),
+                cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = self.entry.name, .style = .{ .size = 16 }, .wrap = false, .ellipsis = true }) }),
+                if (self.modified) |m| cx.make(ui.SizedBox{ .width = modified_width, .child = cx.make(ui.Text{ .text = m, .style = detail, .wrap = false, .ellipsis = true }) }) else cx.make(ui.Empty{}),
+                cx.make(ui.SizedBox{ .width = size_width, .child = cx.make(ui.Text{ .text = self.size, .style = detail, .wrap = false, .text_align = .end }) }),
+            } }) }),
+        }) });
+    }
+};
+
 /// What an item is, as a Material icon (folders in the primary colour);
 /// links get a badge in the corner, and folders that cannot be changed
 /// (the system's) a lock in the other.
@@ -497,7 +607,7 @@ test "the tree and the grid fit, from the smallest window to the biggest" {
     const u = try ui.Ui.create(testing.allocator, &f);
     defer u.destroy();
     for (test_sizes) |size| {
-        u.frame(size[0], size[1], 0, Files{ .browser = &b });
+        u.frame(size[0], size[1], 0, Files{ .browser = &b, .width = @floatFromInt(size[0]) });
         try testing.expect(!overflows(u.root.?));
     }
     // The tree: the user's files and its folders, and nothing above it; the switch for
@@ -509,7 +619,7 @@ test "the tree and the grid fit, from the smallest window to the biggest" {
     // Fits with them shown, too.
     try b.showSystem(true);
     for (test_sizes) |size| {
-        u.frame(size[0], size[1], 0, Files{ .browser = &b });
+        u.frame(size[0], size[1], 0, Files{ .browser = &b, .width = @floatFromInt(size[0]) });
         try testing.expect(!overflows(u.root.?));
     }
     // The grid, and how many items there are.
@@ -669,4 +779,59 @@ fn findDisclosure(n: *ui.Node) ?*ui.Node {
     if (n.widget.is(Disclosure)) return n;
     for (n.children.items) |ch| if (findDisclosure(ch)) |d| return d;
     return null;
+}
+
+test "the order and the layout: the newest first, and a list" {
+    var t: fs.TestTree = .{};
+    try t.init();
+    defer t.deinit();
+    var b = try Browser.init(testing.allocator, t.path);
+    defer b.deinit();
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    var n: u64 = 0;
+    const Frame = struct {
+        fn draw(uu: *ui.Ui, bb: *Browser, nn: *u64, size: [2]u32) void {
+            _ = bb.apply();
+            nn.* += 1;
+            uu.frame(size[0], size[1], nn.*, Files{ .browser = bb, .now = 1791331200, .width = @floatFromInt(size[0]) });
+        }
+    }.draw;
+    Frame(u, &b, &n, .{ 1600, 900 });
+    // By name, as icons, to begin with; each button changes it.
+    click(u, up(findText(u.root.?, "Name").?, ui.OutlinedButton).?);
+    Frame(u, &b, &n, .{ 1600, 900 });
+    try testing.expectEqual(fs.Order.newest, b.order);
+    try testing.expect(findText(u.root.?, "Newest") != null);
+    click(u, up(findText(u.root.?, "Icons").?, ui.OutlinedButton).?);
+    Frame(u, &b, &n, .{ 1600, 900 });
+    try testing.expectEqual(Layout.list, b.layout);
+
+    // The list: its columns, and a row for each item with its size.
+    try testing.expect(findText(u.root.?, "Modified") != null);
+    try testing.expect(findType(u.root.?, Tile) == null);
+    const row = up(findText(u.root.?, "b-file").?, ListRow).?;
+    try testing.expect(findText(row, "5 bytes") != null);
+    // Clicking a row picks (and shows) it, as a tile does.
+    click(u, row);
+    Frame(u, &b, &n, .{ 1600, 900 });
+    try testing.expectEqualStrings("b-file", b.listing.entries[b.selected.?].name);
+    // While a file is shown, the order and layout stay as they are.
+    try testing.expect(up(findText(u.root.?, "List").?, ui.OutlinedButton).?.widget.as(ui.OutlinedButton).?.on_press == null);
+    b.request(.up);
+    Frame(u, &b, &n, .{ 1600, 900 });
+    for (test_sizes) |size| {
+        Frame(u, &b, &n, size);
+        try testing.expect(!overflows(u.root.?));
+    }
+    // A narrow window has no room for when items were changed.
+    Frame(u, &b, &n, min_size);
+    try testing.expect(findText(u.root.?, "Modified") == null);
+    try testing.expect(findText(u.root.?, "b-file") != null);
+    Frame(u, &b, &n, .{ 1600, 900 });
+    // Back to icons.
+    click(u, up(findText(u.root.?, "List").?, ui.OutlinedButton).?);
+    Frame(u, &b, &n, .{ 1600, 900 });
+    try testing.expect(tile(u, "b-file") != null);
 }

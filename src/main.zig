@@ -9,6 +9,7 @@
 //! It runs until it is stopped or its window is closed.
 
 const std = @import("std");
+const linux = std.os.linux;
 const sys = @import("sys");
 const font = @import("font");
 const vc4 = @import("vc4");
@@ -123,6 +124,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
                 .on_drag = .of(&controls, app.Controls.drag),
                 .maximized = win.maximized,
                 .width = @floatFromInt(width),
+                .now = realNow(),
             });
             if (window_ui.changed()) {
                 idle = false;
@@ -165,4 +167,11 @@ test {
     _ = fs;
     _ = browser_mod;
     _ = view;
+}
+
+/// The time now, in seconds since 1970.
+fn realNow() i64 {
+    var ts: linux.timespec = undefined;
+    _ = linux.clock_gettime(.REALTIME, &ts);
+    return ts.sec;
 }

@@ -27,7 +27,15 @@ pub const Action = union(enum) {
     up,
     /// Show the system's files too (the root is /), or only the user's.
     show_system: bool,
+    /// Put the open folder's items in this order.
+    order: fs.Order,
+    /// Show them so.
+    layout: Layout,
 };
+
+/// How the open folder's items are shown: as a grid of icons, or as a list
+/// with when each was changed and its size.
+pub const Layout = enum { icons, list };
 
 pub const Browser = struct {
     gpa: std.mem.Allocator,
@@ -35,6 +43,9 @@ pub const Browser = struct {
     user_files: []const u8,
     /// The system's files are shown too: the root is / rather than `user_files`.
     show_system: bool = false,
+    /// The order of the open folder's items, and how they are shown.
+    order: fs.Order = .name,
+    layout: Layout = .icons,
     /// The open folder.
     path: []u8,
     listing: fs.Listing,
@@ -103,8 +114,21 @@ pub const Browser = struct {
             .activate => |i| b.activate(i) catch {},
             .up => if (b.file != null) b.closeFile() else if (!b.atRoot()) b.open(fs.parent(b.path)) catch {},
             .show_system => |on| b.showSystem(on) catch {},
+            .order => |o| b.sortBy(o),
+            .layout => |l| b.layout = l,
         }
         return true;
+    }
+
+    /// Puts the open folder's items in `order`; the item picked stays
+    /// picked.
+    pub fn sortBy(b: *Browser, order: fs.Order) void {
+        b.order = order;
+        const picked: ?[]const u8 = if (b.selected) |i| (if (i < b.listing.entries.len) b.listing.entries[i].name else null) else null;
+        b.listing.sort(order);
+        if (picked) |name| b.selected = for (b.listing.entries, 0..) |e, i| {
+            if (e.name.ptr == name.ptr) break i;
+        } else null;
     }
 
     /// Shows the system's files too, or only the user's (going back to the user's files if the
@@ -125,6 +149,7 @@ pub const Browser = struct {
         b.closeFile();
         b.listing.deinit();
         b.listing = fs.Listing.read(b.gpa, new);
+        b.listing.sort(b.order);
         b.selected = null;
         try b.expandTo(new);
     }
@@ -279,4 +304,38 @@ test "opening folders, from the tree and the grid, and going up as far as the us
     try b.showSystem(true);
     try b.showSystem(false);
     try testing.expectEqualStrings(sub, b.path);
+}
+
+test "the newest first, and the item picked stays picked; and the list" {
+    var t: fs.TestTree = .{};
+    try t.init();
+    defer t.deinit();
+    // b-file older than c-tool.
+    var z: [128]u8 = undefined;
+    for ([_]struct { []const u8, isize }{ .{ "b-file", 1_000_000_000 }, .{ "c-tool", 2_000_000_000 } }) |f| {
+        const times = [2]std.os.linux.timespec{ .{ .sec = f[1], .nsec = 0 }, .{ .sec = f[1], .nsec = 0 } };
+        _ = std.os.linux.utimensat(std.os.linux.AT.FDCWD, try std.fmt.bufPrintZ(&z, "{s}/{s}", .{ t.path, f[0] }), &times, 0);
+    }
+    var b = try Browser.init(testing.allocator, t.path);
+    defer b.deinit();
+    // By name: A-folder, z-link (to a folder), b-file, broken, c-tool.
+    try testing.expectEqualStrings("b-file", b.listing.entries[2].name);
+    b.request(.{ .activate = 2 });
+    _ = b.apply();
+    b.request(.{ .order = .newest });
+    try testing.expect(b.apply());
+    try testing.expectEqual(fs.Order.newest, b.order);
+    // Folders first still, then c-tool, b-file (still picked), broken.
+    try testing.expectEqualStrings("c-tool", b.listing.entries[2].name);
+    try testing.expectEqualStrings("b-file", b.listing.entries[b.selected.?].name);
+    try testing.expectEqualStrings("broken", b.listing.entries[4].name);
+    // A folder opened is in the same order.
+    b.request(.{ .open = t.path });
+    _ = b.apply();
+    try testing.expectEqualStrings("c-tool", b.listing.entries[2].name);
+
+    try testing.expectEqual(Layout.icons, b.layout);
+    b.request(.{ .layout = .list });
+    _ = b.apply();
+    try testing.expectEqual(Layout.list, b.layout);
 }

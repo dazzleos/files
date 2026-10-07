@@ -24,6 +24,8 @@ pub const Entry = struct {
     link: bool = false,
     /// In bytes, for files.
     size: u64 = 0,
+    /// When it was last changed, in seconds since 1970.
+    modified: i64 = 0,
     /// For folders: whether there are folders in it, if that is known.
     subfolders: ?bool = null,
     /// For folders: whether things can be made in it. The system's are
@@ -34,9 +36,14 @@ pub const Entry = struct {
 /// The most entries read from one folder.
 pub const max_entries = 1000;
 
+/// The order of a folder's items: folders first either way, then by name
+/// (ignoring case), or the most recently changed first.
+pub const Order = enum { name, newest };
+
 pub const Listing = struct {
     arena: std.heap.ArenaAllocator,
-    /// Folders first, then the rest; each by name, ignoring case.
+    /// Folders first, then the rest; each by name, ignoring case (unless
+    /// sorted otherwise, `sort`).
     entries: []Entry = &.{},
     /// Why it could not be read, if it could not.
     err: ?sys.Error = null,
@@ -56,6 +63,11 @@ pub const Listing = struct {
 
     pub fn deinit(l: *Listing) void {
         l.arena.deinit();
+    }
+
+    /// Puts the items in `order` (they are read by name).
+    pub fn sort(l: *Listing, order: Order) void {
+        std.mem.sort(Entry, l.entries, order, before);
     }
 
     /// The folders in it (they come first).
@@ -87,8 +99,9 @@ pub const Listing = struct {
                 if (entries.items.len == max_entries) continue;
                 var e: Entry = .{ .name = a.dupe(u8, name) catch return error.OutOfMemory, .kind = .other, .link = d_type == dt_lnk };
                 var stx: linux.Statx = undefined;
-                if (linux.errno(linux.statx(dir, name_z, 0, .{ .TYPE = true, .MODE = true, .SIZE = true, .NLINK = true }, &stx)) == .SUCCESS) {
+                if (linux.errno(linux.statx(dir, name_z, 0, .{ .TYPE = true, .MODE = true, .SIZE = true, .NLINK = true, .MTIME = true }, &stx)) == .SUCCESS) {
                     e.kind = kindOf(stx.mode);
+                    e.modified = stx.mtime.sec;
                     if (e.kind == .file or e.kind == .program) e.size = stx.size;
                     if (e.kind == .folder and stx.mask.NLINK) e.subfolders = hasSubfolders(stx.nlink);
                     if (e.kind == .folder) e.writable = linux.faccessat(dir, name_z, linux.W_OK, 0) == 0;
@@ -96,8 +109,8 @@ pub const Listing = struct {
                 entries.append(a, e) catch return error.OutOfMemory;
             }
         }
-        std.mem.sort(Entry, entries.items, {}, before);
         l.entries = entries.items;
+        l.sort(.name);
     }
 };
 
@@ -119,11 +132,12 @@ fn kindOf(mode: u16) Kind {
     };
 }
 
-/// Folders first, then by name, ignoring case.
-fn before(_: void, a: Entry, b: Entry) bool {
+/// Folders first, then in `order` (by name for ties).
+fn before(order: Order, a: Entry, b: Entry) bool {
     const af = a.kind == .folder;
     const bf = b.kind == .folder;
     if (af != bf) return af;
+    if (order == .newest and a.modified != b.modified) return a.modified > b.modified;
     return switch (std.ascii.orderIgnoreCase(a.name, b.name)) {
         .lt => true,
         .gt => false,
@@ -217,7 +231,58 @@ pub fn formatSize(buf: []u8, size: u64) []const u8 {
     return std.fmt.bufPrint(buf, "{d:.1} {s}", .{ v, units[i] }) catch "";
 }
 
+/// When something was changed, for people, against `now` (both in seconds
+/// since 1970, in UTC, the only time the system has): "Today, 10:32",
+/// "Yesterday, 18:05", "7 Oct" this year, else "7 Oct 2025".
+pub fn formatTime(buf: []u8, secs: i64, now: i64) []const u8 {
+    if (secs <= 0) return "";
+    const months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    const day_secs = std.time.s_per_day;
+    const day = @divFloor(secs, day_secs);
+    const today = @divFloor(now, day_secs);
+    const in_day: u64 = @intCast(@mod(secs, day_secs));
+    if (day == today or day == today - 1)
+        return std.fmt.bufPrint(buf, "{s}, {d:0>2}:{d:0>2}", .{ if (day == today) "Today" else "Yesterday", in_day / 3600, in_day / 60 % 60 }) catch "";
+    const date = (std.time.epoch.EpochDay{ .day = @intCast(day) }).calculateYearDay();
+    const md = date.calculateMonthDay();
+    const this_year = (std.time.epoch.EpochDay{ .day = @intCast(@max(today, 0)) }).calculateYearDay().year;
+    const month = months[@intFromEnum(md.month) - 1];
+    if (date.year == this_year) return std.fmt.bufPrint(buf, "{d} {s}", .{ md.day_index + 1, month }) catch "";
+    return std.fmt.bufPrint(buf, "{d} {s} {d}", .{ md.day_index + 1, month, date.year }) catch "";
+}
+
 const testing = std.testing;
+
+test "times, for people" {
+    var buf: [32]u8 = undefined;
+    // 2026-10-07 10:32 UTC.
+    const now: i64 = 1791331200 + 10 * 3600 + 32 * 60;
+    try testing.expectEqualStrings("Today, 10:32", formatTime(&buf, now, now));
+    try testing.expectEqualStrings("Today, 00:00", formatTime(&buf, 1791331200, now));
+    try testing.expectEqualStrings("Yesterday, 18:05", formatTime(&buf, 1791331200 - 6 * 3600 + 5 * 60, now));
+    try testing.expectEqualStrings("1 Jan", formatTime(&buf, 1767225600, now));
+    try testing.expectEqualStrings("31 Dec 2025", formatTime(&buf, 1767225600 - 60, now));
+    try testing.expectEqualStrings("", formatTime(&buf, 0, now));
+}
+
+test "the newest first, folders still first" {
+    var l: Listing = .{ .arena = .init(testing.allocator) };
+    defer l.deinit();
+    var entries = [_]Entry{
+        .{ .name = "b.txt", .kind = .file, .modified = 300 },
+        .{ .name = "old", .kind = .folder, .modified = 100 },
+        .{ .name = "A.txt", .kind = .file, .modified = 100 },
+        .{ .name = "new", .kind = .folder, .modified = 900 },
+        .{ .name = "c.txt", .kind = .file, .modified = 300 },
+    };
+    l.entries = &entries;
+    l.sort(.newest);
+    const newest = [_][]const u8{ "new", "old", "b.txt", "c.txt", "A.txt" };
+    for (newest, l.entries) |want, e| try testing.expectEqualStrings(want, e.name);
+    l.sort(.name);
+    const by_name = [_][]const u8{ "new", "old", "A.txt", "b.txt", "c.txt" };
+    for (by_name, l.entries) |want, e| try testing.expectEqualStrings(want, e.name);
+}
 
 test "the system's folders are described" {
     try testing.expectEqualStrings("The devices in this computer", describe("/dev").?);
