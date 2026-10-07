@@ -2,14 +2,16 @@
 //! item picked in it (and what is in it, if it is a file: see
 //! content.zig), and the folders opened in the tree (with the folders
 //! in each, read when it is opened). Everything is within a root: the
-//! user's files (`user_files`: /data/user, on the SD card) unless the
-//! system's files are shown too, when it is /; nothing above it is opened.
+//! user's files (`user_files`: /data/user, on the SD card) or a USB drive
+//! (each a folder of /media), unless the system's files are shown too,
+//! when it is /; nothing above it is opened.
 //!
 //! The window's widgets ask for changes (`request`); they are made between
 //! frames (`apply`), so nothing a widget of the last frame points to (an
 //! entry's name, say) is freed while events still go to it.
 
 const std = @import("std");
+const sys = @import("sys");
 const fs = @import("fs.zig");
 const content = @import("content.zig");
 
@@ -38,6 +40,8 @@ pub const Action = union(enum) {
     make_folder,
     /// Delete the item picked: a file, or a folder and everything in it.
     delete,
+    /// Eject the USB drive of this name (in /media), for it to be taken out.
+    eject: []const u8,
 };
 
 /// What the window is asking: nothing, a new folder's name, or whether to
@@ -75,6 +79,15 @@ pub const Browser = struct {
     name_len: usize = 0,
     /// How many things are in the folder to be deleted, if it is one.
     delete_count: ?usize = null,
+    /// The USB drives plugged in: the folders in `media_dir`.
+    media_dir: []const u8 = sys.media.media_dir,
+    drives: fs.Listing,
+    /// Asks the media manager to eject a drive.
+    ejector: *const fn (name: []const u8) ?sys.media.Answer = askEject,
+    /// What happened (to a drive ejected), said at the bottom until
+    /// something else is done.
+    notice_buf: [200]u8 = undefined,
+    notice_len: usize = 0,
     /// What was asked for since the last `apply`, and room for its path.
     pending: ?Action = null,
     pending_path: std.ArrayList(u8) = .empty,
@@ -82,7 +95,13 @@ pub const Browser = struct {
     /// Starts at `user_files` (which must last as long as the browser), showing
     /// only what is in it.
     pub fn init(gpa: std.mem.Allocator, user_files: []const u8) !Browser {
-        var b: Browser = .{ .gpa = gpa, .user_files = user_files, .path = try gpa.dupe(u8, user_files), .listing = fs.Listing.read(gpa, user_files) };
+        var b: Browser = .{
+            .gpa = gpa,
+            .user_files = user_files,
+            .path = try gpa.dupe(u8, user_files),
+            .listing = fs.Listing.read(gpa, user_files),
+            .drives = fs.Listing.read(gpa, sys.media.media_dir),
+        };
         try b.expand(user_files);
         return b;
     }
@@ -92,8 +111,77 @@ pub const Browser = struct {
         return if (b.show_system) "/" else b.user_files;
     }
 
+    /// The root `path` is within (a part of `path`), if it is within one:
+    /// the system's files, the user's files, or a USB drive.
+    pub fn rootOf(b: *const Browser, path: []const u8) ?[]const u8 {
+        if (b.show_system) return if (fs.within(path, "/")) "/" else null;
+        if (fs.within(path, b.user_files)) return b.user_files;
+        const media = b.media_dir;
+        if (!fs.within(path, media) or path.len == media.len) return null;
+        const rest = path[media.len + 1 ..];
+        const name = rest[0 .. std.mem.indexOfScalar(u8, rest, '/') orelse rest.len];
+        if (!b.isDrive(name)) return null;
+        return path[0 .. media.len + 1 + name.len];
+    }
+
+    /// Whether a USB drive of this name is plugged in.
+    pub fn isDrive(b: *const Browser, name: []const u8) bool {
+        for (b.drives.entries) |e| if (e.kind == .folder and !e.link and std.mem.eql(u8, e.name, name)) return true;
+        return false;
+    }
+
+    /// The name of the USB drive whose folder `path` is, if it is one.
+    pub fn driveAt(b: *const Browser, path: []const u8) ?[]const u8 {
+        if (!std.mem.eql(u8, fs.parent(path), b.media_dir)) return null;
+        const name = path[b.media_dir.len + 1 ..];
+        return if (b.isDrive(name)) name else null;
+    }
+
     pub fn atRoot(b: *const Browser) bool {
-        return std.mem.eql(u8, b.path, b.root());
+        const r = b.rootOf(b.path) orelse return true;
+        return std.mem.eql(u8, b.path, r);
+    }
+
+    pub fn notice(b: *const Browser) ?[]const u8 {
+        return if (b.notice_len > 0) b.notice_buf[0..b.notice_len] else null;
+    }
+
+    fn say(b: *Browser, comptime fmt: []const u8, args: anytype) void {
+        const text: []const u8 = std.fmt.bufPrint(&b.notice_buf, fmt, args) catch "";
+        b.notice_len = text.len;
+    }
+
+    /// Reads the drives plugged in again (when /media changes). If the
+    /// open folder was on one that has gone, the user's files open.
+    pub fn refreshDrives(b: *Browser) void {
+        b.drives.deinit();
+        b.drives = fs.Listing.read(b.gpa, b.media_dir);
+        // The tree's folders on drives that have gone close.
+        while (true) {
+            var it = b.expanded.keyIterator();
+            const key = while (it.next()) |k| {
+                if (b.rootOf(k.*) == null) break k.*;
+            } else break;
+            var kv = b.expanded.fetchRemove(key).?;
+            kv.value.deinit();
+            b.gpa.free(kv.key);
+        }
+        if (b.rootOf(b.path) == null) b.open(b.user_files) catch {};
+    }
+
+    fn eject(b: *Browser, name: []const u8) void {
+        if (!b.isDrive(name)) return;
+        // Not looking at it any more.
+        const path = fs.join(b.gpa, b.media_dir, name) catch return;
+        defer b.gpa.free(path);
+        if (fs.within(b.path, path)) b.open(b.user_files) catch {};
+        switch (b.ejector(name) orelse .failed) {
+            .ejected => b.say("You can take out \u{201c}{s}\u{201d} now", .{name}),
+            .busy => b.say("\u{201c}{s}\u{201d} is in use: close what is open on it, then eject it again", .{name}),
+            .unknown => b.say("\u{201c}{s}\u{201d} is not plugged in", .{name}),
+            .failed => b.say("\u{201c}{s}\u{201d} could not be ejected", .{name}),
+        }
+        b.refreshDrives();
     }
 
     pub fn deinit(b: *Browser) void {
@@ -105,6 +193,7 @@ pub const Browser = struct {
         b.expanded.deinit(b.gpa);
         b.closeFile();
         b.listing.deinit();
+        b.drives.deinit();
         b.gpa.free(b.path);
         b.pending_path.deinit(b.gpa);
     }
@@ -114,7 +203,7 @@ pub const Browser = struct {
     pub fn request(b: *Browser, action: Action) void {
         var a = action;
         switch (a) {
-            inline .open, .toggle => |path, tag| {
+            inline .open, .toggle, .eject => |path, tag| {
                 b.pending_path.clearRetainingCapacity();
                 b.pending_path.appendSlice(b.gpa, path) catch return;
                 a = @unionInit(Action, @tagName(tag), b.pending_path.items);
@@ -128,6 +217,7 @@ pub const Browser = struct {
     pub fn apply(b: *Browser) bool {
         const a = b.pending orelse return false;
         b.pending = null;
+        b.notice_len = 0;
         switch (a) {
             .open => |path| b.open(path) catch {},
             .toggle => |path| b.toggle(path) catch {},
@@ -139,6 +229,7 @@ pub const Browser = struct {
             .prompt => |p| b.ask(p),
             .make_folder => b.makeFolder(),
             .delete => b.delete(),
+            .eject => |name| b.eject(name),
         }
         return true;
     }
@@ -273,13 +364,13 @@ pub const Browser = struct {
     pub fn showSystem(b: *Browser, on: bool) !void {
         b.show_system = on;
         try b.expand(b.root());
-        if (!fs.within(b.path, b.root())) try b.open(b.user_files) else try b.expandTo(b.path);
+        if (b.rootOf(b.path) == null) try b.open(b.user_files) else try b.expandTo(b.path);
     }
 
     /// Shows the folder at `path` (if it is within the root), opening the
     /// folders above it in the tree.
     pub fn open(b: *Browser, path: []const u8) !void {
-        if (!fs.within(path, b.root())) return;
+        if (b.rootOf(path) == null) return;
         const new = try b.gpa.dupe(u8, path);
         b.gpa.free(b.path);
         b.path = new;
@@ -348,10 +439,11 @@ pub const Browser = struct {
     /// Opens the folders above `path` (not `path` itself) in the tree, from
     /// the root.
     fn expandTo(b: *Browser, path: []const u8) !void {
+        const r = b.rootOf(path) orelse return;
         var end: usize = 0;
         while (end < path.len) {
             const ancestor = if (end == 0) "/" else path[0..end];
-            if (fs.within(ancestor, b.root()) and !b.isExpanded(ancestor)) try b.expand(ancestor);
+            if (fs.within(ancestor, r) and !b.isExpanded(ancestor)) try b.expand(ancestor);
             end = std.mem.indexOfScalarPos(u8, path, end + 1, '/') orelse break;
         }
     }
@@ -365,6 +457,11 @@ pub const Browser = struct {
         try b.expanded.put(b.gpa, key, l);
     }
 };
+
+/// Asks the media manager, giving it time to write what is left.
+fn askEject(name: []const u8) ?sys.media.Answer {
+    return sys.media.eject(name, 30_000);
+}
 
 const testing = std.testing;
 
@@ -555,4 +652,73 @@ test "making a folder, which is picked; and deleting files, and folders with wha
     _ = b.apply();
     try testing.expectEqualStrings("A-folder", b.listing.entries[0].name);
     try testing.expectEqual(@as(usize, 3), b.listing.entries.len);
+}
+
+test "USB drives: opened like the user's files, ejected, and gone" {
+    var t: fs.TestTree = .{};
+    try t.init();
+    defer t.deinit();
+    // A folder of its own stands for /media, with a drive in it.
+    var buf: [128]u8 = undefined;
+    const media = try std.fmt.bufPrintZ(&buf, "{s}-media", .{t.path});
+    _ = std.os.linux.mkdir(media, 0o755);
+    defer sys.files.removeTree(media);
+    try fs.makeFolder(media, "STICK");
+    var photo_buf: [160]u8 = undefined;
+    try sys.files.writeNew(try std.fmt.bufPrintZ(&photo_buf, "{s}/STICK/photo", .{media}), "jpeg");
+    var b = try Browser.init(testing.allocator, t.path);
+    defer b.deinit();
+    b.media_dir = media;
+    b.refreshDrives();
+    const Eject = struct {
+        var answer: sys.media.Answer = .ejected;
+        var asked: ?[]const u8 = null;
+        fn f(name: []const u8) ?sys.media.Answer {
+            asked = name;
+            return answer;
+        }
+    };
+    b.ejector = Eject.f;
+
+    var drive_buf: [128]u8 = undefined;
+    const drive = try std.fmt.bufPrint(&drive_buf, "{s}/STICK", .{media});
+    try testing.expectEqualStrings("STICK", b.driveAt(drive).?);
+    try testing.expect(b.driveAt(t.path) == null);
+    try testing.expectEqualStrings(drive, b.rootOf(drive).?);
+    // Its folder opens, and up stops there.
+    b.request(.{ .open = drive });
+    _ = b.apply();
+    try testing.expectEqualStrings(drive, b.path);
+    try testing.expectEqualStrings("photo", b.listing.entries[0].name);
+    try testing.expect(b.atRoot());
+    b.request(.up);
+    _ = b.apply();
+    try testing.expectEqualStrings(drive, b.path);
+
+    // Busy: it stays, and says so; ejected: the user's files open.
+    Eject.answer = .busy;
+    b.request(.{ .eject = "STICK" });
+    _ = b.apply();
+    try testing.expectEqualStrings("STICK", Eject.asked.?);
+    try testing.expectEqualStrings("\u{201c}STICK\u{201d} is in use: close what is open on it, then eject it again", b.notice().?);
+    try testing.expectEqualStrings(t.path, b.path);
+    b.request(.{ .open = drive });
+    _ = b.apply();
+    try testing.expect(b.notice() == null);
+    Eject.answer = .ejected;
+    b.request(.{ .eject = "STICK" });
+    _ = b.apply();
+    try testing.expectEqualStrings("You can take out \u{201c}STICK\u{201d} now", b.notice().?);
+    try testing.expectEqualStrings(t.path, b.path);
+
+    // Pulled out while open: back to the user's files.
+    b.request(.{ .open = drive });
+    _ = b.apply();
+    try fs.delete(media, "STICK");
+    b.refreshDrives();
+    try testing.expectEqualStrings(t.path, b.path);
+    try testing.expect(!b.isExpanded(drive));
+    b.request(.{ .open = drive });
+    _ = b.apply();
+    try testing.expectEqualStrings(t.path, b.path);
 }

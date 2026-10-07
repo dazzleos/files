@@ -6,6 +6,9 @@
 //! many there are), with buttons to make a folder and to delete the item
 //! picked. The tree and the items scroll.
 //!
+//! USB drives are in the tree under the user's files, each with a button
+//! to eject it (see browser.zig).
+//!
 //! Clicking a folder in the tree or among the items opens it; the arrow
 //! beside a folder in the tree opens or closes it there. Clicking anything
 //! else among the items picks it.
@@ -16,6 +19,7 @@
 
 const std = @import("std");
 const ui = @import("ui");
+const sys = @import("sys");
 const gfx = @import("gfx");
 const fs = @import("fs.zig");
 const browser_mod = @import("browser.zig");
@@ -54,6 +58,12 @@ pub const Files = struct {
         var items: std.ArrayList(TreeItem) = .empty;
         const root = b.root();
         self.treeItems(cx, &items, root, if (std.mem.eql(u8, root, b.user_files)) "User files" else root, null, !fs.writable(root), 0);
+        // The USB drives (with the system's files, they are in /media).
+        if (!b.show_system) for (b.drives.entries) |e| {
+            if (e.kind != .folder or e.link) continue;
+            const path = fs.join(cx.ui.arena(), b.media_dir, e.name) catch break;
+            self.treeItems(cx, &items, path, e.name, e.subfolders, !e.writable, 0);
+        };
         const open_row: ?usize = for (items.items, 0..) |item, i| {
             if (std.mem.eql(u8, item.path, b.path)) break i;
         } else null;
@@ -95,7 +105,7 @@ pub const Files = struct {
         // the system's), or what the file shown holds.
         const file_path = b.filePath(cx.ui.arena());
         const path_text = cx.make(ui.Text{ .text = file_path orelse b.path, .style = .{ .size = 20 }, .wrap = false, .ellipsis = true });
-        const description: ?[]const u8 = if (b.file) |*f| (if (f.err == null) viewer.describe(cx, f) else null) else fs.describe(b.path);
+        const description: ?[]const u8 = if (b.file) |*f| (if (f.err == null) viewer.describe(cx, f) else null) else if (b.driveAt(b.path) != null) driveSpace(cx, b.path) else fs.describe(b.path);
         const about = if (description) |d| cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 2, .children = &.{
             path_text,
             cx.make(ui.Text{ .text = d, .style = .{ .size = 15, .color = t.on_surface_variant }, .wrap = false, .ellipsis = true }),
@@ -245,7 +255,7 @@ pub const Files = struct {
         const cancel = cx.make(ui.OutlinedButton{ .label = if (labels) "Cancel" else "", .icon = .close, .on_press = callback(cx, .{ .browser = b }, Act.cancel) });
         switch (b.prompt) {
             .none => return cx.make(ui.Row{ .spacing = 12, .children = &.{
-                cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = self.status(cx), .style = note_style, .wrap = false, .ellipsis = true }) }),
+                cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = b.notice() orelse self.status(cx), .style = note_style, .wrap = false, .ellipsis = true }) }),
                 cx.make(ui.OutlinedButton{
                     .label = if (labels) "New folder" else "",
                     .icon = .create_new_folder,
@@ -358,6 +368,8 @@ const Tree = struct {
             .expandable = item.expandable,
             .locked = item.locked,
             .user_files = item.depth == 0 and std.mem.eql(u8, item.path, b.user_files),
+            .drive = b.driveAt(item.path) != null,
+            .on_eject = if (b.driveAt(item.path)) |name| callback(cx, .{ .browser = b, .path = name }, Act.eject) else null,
             .selected = selected,
             .on_open = callback(cx, .{ .browser = b, .path = item.path }, Act.open),
             .on_toggle = callback(cx, .{ .browser = b, .path = item.path }, Act.toggle),
@@ -431,6 +443,10 @@ const Act = struct {
     fn delete(a: *const Act) void {
         a.browser.request(.delete);
     }
+
+    fn eject(a: *const Act) void {
+        a.browser.request(.{ .eject = a.path });
+    }
 };
 
 /// The new folder's name goes to the browser as it is typed.
@@ -482,8 +498,11 @@ pub const TreeRow = struct {
     expanded: bool,
     expandable: bool = true,
     locked: bool = false,
-    /// The user's files: a house rather than a folder.
+    /// The user's files: a person rather than a folder.
     user_files: bool = false,
+    /// A USB drive, with a button to eject it.
+    drive: bool = false,
+    on_eject: ?ui.Callback = null,
     selected: bool,
     on_open: ?ui.Callback,
     on_toggle: ?ui.Callback,
@@ -500,14 +519,20 @@ pub const TreeRow = struct {
             cx.make(Disclosure{ .expanded = self.expanded, .size = 28, .on_press = self.on_toggle })
         else
             cx.make(ui.SizedBox{ .width = 28, .height = 28 });
-        const icon = cx.make(FileIcon{ .kind = .folder, .icon = if (self.user_files) .person else null, .size = 24 });
+        const icon = if (self.drive)
+            cx.make(ui.SizedBox{ .width = 24, .height = 24, .child = cx.make(ui.Icon{ .icon = .usb, .size = 22, .color = t.primary }) })
+        else
+            cx.make(FileIcon{ .kind = .folder, .icon = if (self.user_files) .person else null, .size = 24 });
+        const eject: ?ui.Widget = if (self.on_eject) |on| cx.make(IconButton{ .icon = .eject, .size = 28, .on_press = on }) else null;
         const name = cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = self.label, .style = .{ .size = 17 }, .wrap = false, .ellipsis = true }) });
         return cx.make(ui.Pressable{ .on_press = self.on_open, .interaction = &state.interaction, .child = cx.make(ui.Decorated{
             .color = highlight,
             .radius = .all(height / 2),
             .child = cx.make(ui.SizedBox{ .height = height, .child = cx.make(ui.Padding{
                 .padding = .{ .left = @round(4 + @as(f32, @floatFromInt(@min(self.depth, 16))) * 18), .right = 12 },
-                .child = cx.make(ui.Row{ .spacing = 6, .children = if (self.locked)
+                .child = cx.make(ui.Row{ .spacing = 6, .children = if (eject) |e|
+                    &.{ arrow, icon, name, e }
+                else if (self.locked)
                     &.{ arrow, icon, name, cx.make(ui.Icon{ .icon = .lock, .size = 18, .color = t.on_surface_variant }) }
                 else
                     &.{ arrow, icon, name } }),
@@ -540,6 +565,39 @@ const Disclosure = struct {
         }) });
     }
 };
+
+/// A round button that is an icon (ejecting a drive).
+const IconButton = struct {
+    icon: ui.icons.Icon,
+    size: f32,
+    on_press: ?ui.Callback,
+
+    pub const State = struct {
+        interaction: ui.Interaction = .{},
+    };
+
+    pub fn build(self: *const IconButton, cx: *ui.Context, state: *State) ui.Widget {
+        const t = cx.theme();
+        return cx.make(ui.Pressable{ .on_press = self.on_press, .interaction = &state.interaction, .child = cx.make(ui.Decorated{
+            .color = if (state.interaction.hovered) t.on_surface.withAlpha(0.08) else null,
+            .radius = .all(self.size / 2),
+            .child = cx.make(ui.SizedBox{ .width = self.size, .height = self.size, .child = cx.make(ui.Icon{
+                .icon = self.icon,
+                .size = @round(self.size * 0.75),
+                .color = t.on_surface_variant,
+            }) }),
+        }) });
+    }
+};
+
+/// What a USB drive holds: "USB drive · 1.2 GB free of 16.0 GB".
+fn driveSpace(cx: *ui.Context, path: []const u8) []const u8 {
+    var z: [4096]u8 = undefined;
+    const space = sys.diskSpace(std.fmt.bufPrintZ(&z, "{s}", .{path}) catch return "USB drive") orelse return "USB drive";
+    var free_buf: [32]u8 = undefined;
+    var total_buf: [32]u8 = undefined;
+    return cx.fmt("USB drive  \u{b7}  {s} free of {s}", .{ fs.formatSize(&free_buf, space.free), fs.formatSize(&total_buf, space.total) });
+}
 
 /// An item in the grid: its icon with its name under it.
 pub const Tile = struct {
@@ -1029,4 +1087,69 @@ test "making a folder, and deleting: asked at the bottom, warning that a folder 
     b.request(.{ .prompt = .delete });
     Frame(u, &b, &n, .{ 1600, 900 });
     try testing.expect(findText(u.root.?, "Delete \u{201c}b-file\u{201d}? This cannot be undone.") != null);
+}
+
+test "USB drives in the tree, with what they hold, and ejecting them" {
+    var t: fs.TestTree = .{};
+    try t.init();
+    defer t.deinit();
+    var buf: [128]u8 = undefined;
+    const media = try std.fmt.bufPrintZ(&buf, "{s}-media", .{t.path});
+    _ = std.os.linux.mkdir(media, 0o755);
+    defer sys.files.removeTree(media);
+    try fs.makeFolder(media, "HOLIDAY");
+    var b = try Browser.init(testing.allocator, t.path);
+    defer b.deinit();
+    b.media_dir = media;
+    b.refreshDrives();
+    const Eject = struct {
+        fn f(_: []const u8) ?sys.media.Answer {
+            return .ejected;
+        }
+    };
+    b.ejector = Eject.f;
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    var n: u64 = 0;
+    const Frame = struct {
+        fn draw(uu: *ui.Ui, bb: *Browser, nn: *u64, size: [2]u32) void {
+            _ = bb.apply();
+            nn.* += 1;
+            uu.frame(size[0], size[1], nn.*, Files{ .browser = bb, .width = @floatFromInt(size[0]) });
+        }
+    }.draw;
+    Frame(u, &b, &n, .{ 1600, 900 });
+    // After the user's files, with a USB icon and an eject button.
+    const row = up(findText(u.root.?, "HOLIDAY").?, TreeRow).?;
+    try testing.expect(findIcon(row, .usb) != null);
+    try testing.expect(findIcon(row, .eject) != null);
+    try testing.expect(findIcon(up(findText(u.root.?, "User files").?, TreeRow).?, .eject) == null);
+    // Opened, it says how much space there is.
+    click(u, row);
+    Frame(u, &b, &n, .{ 1600, 900 });
+    try testing.expect(std.mem.endsWith(u8, b.path, "/HOLIDAY"));
+    try testing.expect(findText(u.root.?, "This folder is empty") != null);
+    for (test_sizes) |size| {
+        Frame(u, &b, &n, size);
+        try testing.expect(!overflows(u.root.?));
+    }
+    Frame(u, &b, &n, .{ 1600, 900 });
+    try testing.expect(findTextPrefix(u.root.?, "USB drive  \u{b7}  ") != null);
+    // Ejected: back to the user's files, saying it can be taken out.
+    click(u, up(findIcon(up(findText(u.root.?, "HOLIDAY").?, TreeRow).?, .eject).?, IconButton).?);
+    Frame(u, &b, &n, .{ 1600, 900 });
+    try testing.expectEqualStrings(t.path, b.path);
+    try testing.expect(findText(u.root.?, "You can take out \u{201c}HOLIDAY\u{201d} now") != null);
+    // Gone from the tree when its folder goes.
+    try fs.delete(media, "HOLIDAY");
+    b.refreshDrives();
+    Frame(u, &b, &n, .{ 1600, 900 });
+    try testing.expect(findText(u.root.?, "HOLIDAY") == null);
+}
+
+fn findTextPrefix(n: *ui.Node, prefix: []const u8) ?*ui.Node {
+    if (n.widget.as(ui.Text)) |t| if (std.mem.startsWith(u8, t.text, prefix)) return n;
+    for (n.children.items) |ch| if (findTextPrefix(ch, prefix)) |f| return f;
+    return null;
 }

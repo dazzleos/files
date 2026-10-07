@@ -176,6 +176,7 @@ const descriptions = [_]struct { []const u8, []const u8 }{
     .{ sys.system.user_dir, "Your files" },
     .{ sys.system.apps_dir, "The apps you have installed" },
     .{ sys.system.update_dir, "Updates of Dazzle, while they are installed" },
+    .{ sys.media.media_dir, "The USB drives plugged in" },
     .{ "/dev", "The devices in this computer" },
     .{ "/dev/dri", "The graphics processor" },
     .{ "/dev/input", "Keyboards, mice and other ways of controlling the computer" },
