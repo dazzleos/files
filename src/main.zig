@@ -25,8 +25,11 @@ const print = sys.print;
 /// The clear colour: the dark theme's surface.
 const background = 0xff141218;
 
-/// Backspace goes up a folder.
+/// Keys: Backspace goes up a folder, Delete asks whether to delete the
+/// item picked, and Escape stops asking (unless a text field has them).
 const key_backspace = 14;
+const key_delete = 111;
+const key_escape = 1;
 
 var frame: vc4.render.Frame = undefined;
 
@@ -103,7 +106,17 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         for (win.takeInput()) |e| switch (e) {
             .motion => |pos| window_ui.pointerMotion(pos),
             .button => |b| window_ui.pointerButton(b.pos, b.code, b.pressed),
-            .key => |k| if (k.pressed and k.code == key_backspace) browser.request(.up),
+            .key => |k| {
+                const typing = window_ui.focused != null;
+                window_ui.keyEvent(k.code, k.pressed);
+                if (k.pressed) switch (k.code) {
+                    key_backspace => if (!typing) browser.request(.up),
+                    key_delete => if (!typing and browser.prompt == .none) browser.request(.{ .prompt = .delete }),
+                    key_escape => if (browser.prompt != .none) browser.request(.{ .prompt = .none }),
+                    else => {},
+                };
+                dirty = true;
+            },
             .scroll => |sc| window_ui.pointerScroll(sc.pos, sc.dx, sc.dy),
             .leave => window_ui.pointerLeave(),
             .touch_down => |t| window_ui.touchDown(t.id, t.pos),

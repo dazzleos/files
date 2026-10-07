@@ -31,7 +31,18 @@ pub const Action = union(enum) {
     order: fs.Order,
     /// Show them so.
     layout: Layout,
+    /// Ask for a new folder's name, or whether to delete the item picked
+    /// (or neither, any more).
+    prompt: Prompt,
+    /// Make the folder named `name` in the open folder, and pick it.
+    make_folder,
+    /// Delete the item picked: a file, or a folder and everything in it.
+    delete,
 };
+
+/// What the window is asking: nothing, a new folder's name, or whether to
+/// delete the item picked.
+pub const Prompt = enum { none, new_folder, delete };
 
 /// How the open folder's items are shown: as a grid of icons, or as a list
 /// with when each was changed and its size.
@@ -55,6 +66,15 @@ pub const Browser = struct {
     file: ?content.Content = null,
     /// The folders open in the tree, and the folders in each.
     expanded: std.StringHashMapUnmanaged(fs.Listing) = .empty,
+    /// What the window is asking, and why the last change asked for
+    /// could not be made (shown with it).
+    prompt: Prompt = .none,
+    failure: ?[]const u8 = null,
+    /// The new folder's name, as it is typed.
+    name_buf: [255]u8 = undefined,
+    name_len: usize = 0,
+    /// How many things are in the folder to be deleted, if it is one.
+    delete_count: ?usize = null,
     /// What was asked for since the last `apply`, and room for its path.
     pending: ?Action = null,
     pending_path: std.ArrayList(u8) = .empty,
@@ -116,17 +136,134 @@ pub const Browser = struct {
             .show_system => |on| b.showSystem(on) catch {},
             .order => |o| b.sortBy(o),
             .layout => |l| b.layout = l,
+            .prompt => |p| b.ask(p),
+            .make_folder => b.makeFolder(),
+            .delete => b.delete(),
         }
         return true;
+    }
+
+    /// The new folder's name, as it is typed (kept until it is made or
+    /// asked for again).
+    pub fn setName(b: *Browser, text: []const u8) void {
+        const n = @min(text.len, b.name_buf.len);
+        @memcpy(b.name_buf[0..n], text[0..n]);
+        b.name_len = n;
+    }
+
+    pub fn newName(b: *const Browser) []const u8 {
+        return b.name_buf[0..b.name_len];
+    }
+
+    /// Whether things can be made in, and deleted from, the open folder.
+    pub fn changeable(b: *const Browser) bool {
+        return b.listing.err == null and fs.writable(b.path);
+    }
+
+    /// The item picked, if there is one.
+    pub fn picked(b: *const Browser) ?fs.Entry {
+        const i = b.selected orelse return null;
+        return if (i < b.listing.entries.len) b.listing.entries[i] else null;
+    }
+
+    fn ask(b: *Browser, p: Prompt) void {
+        b.failure = null;
+        b.delete_count = null;
+        switch (p) {
+            .none => {},
+            .new_folder => {
+                if (b.file != null or !b.changeable()) return;
+                b.name_len = 0;
+            },
+            .delete => {
+                const e = b.picked() orelse return;
+                if (!b.changeable()) return;
+                if (e.kind == .folder and !e.link) {
+                    const path = fs.join(b.gpa, b.path, e.name) catch return;
+                    defer b.gpa.free(path);
+                    b.delete_count = fs.countItems(path);
+                }
+            },
+        }
+        b.prompt = p;
+    }
+
+    fn makeFolder(b: *Browser) void {
+        if (b.prompt != .new_folder) return;
+        fs.makeFolder(b.path, b.newName()) catch |err| {
+            b.failure = fs.describeError(err);
+            return;
+        };
+        b.prompt = .none;
+        b.failure = null;
+        b.reload();
+        // The new folder is picked.
+        b.selected = for (b.listing.entries, 0..) |e, i| {
+            if (std.mem.eql(u8, e.name, b.newName())) break i;
+        } else null;
+    }
+
+    fn delete(b: *Browser) void {
+        if (b.prompt != .delete) return;
+        const e = b.picked() orelse return;
+        fs.delete(b.path, e.name) catch |err| {
+            b.failure = fs.describeError(err);
+            // Some of it may have gone.
+            if (err == error.NotDeleted) b.delete_count = b.countPicked();
+            return;
+        };
+        // The folders that were in it close in the tree.
+        if (e.kind == .folder and !e.link) if (fs.join(b.gpa, b.path, e.name)) |path| {
+            defer b.gpa.free(path);
+            b.collapseWithin(path);
+        } else |_| {};
+        b.prompt = .none;
+        b.failure = null;
+        b.delete_count = null;
+        b.reload();
+    }
+
+    fn countPicked(b: *const Browser) ?usize {
+        const e = b.picked() orelse return null;
+        const path = fs.join(b.gpa, b.path, e.name) catch return null;
+        defer b.gpa.free(path);
+        return fs.countItems(path);
+    }
+
+    /// Reads the open folder again (and its folders in the tree), after a
+    /// change; nothing is picked.
+    fn reload(b: *Browser) void {
+        b.closeFile();
+        b.listing.deinit();
+        b.listing = fs.Listing.read(b.gpa, b.path);
+        b.listing.sort(b.order);
+        b.selected = null;
+        if (b.expanded.getPtr(b.path)) |l| {
+            l.deinit();
+            l.* = fs.Listing.read(b.gpa, b.path);
+        }
+    }
+
+    /// Closes the folders at and in `path` in the tree.
+    fn collapseWithin(b: *Browser, path: []const u8) void {
+        while (true) {
+            var it = b.expanded.keyIterator();
+            const key = while (it.next()) |k| {
+                if (fs.within(k.*, path)) break k.*;
+            } else return;
+            var kv = b.expanded.fetchRemove(key).?;
+            kv.value.deinit();
+            b.gpa.free(kv.key);
+        }
     }
 
     /// Puts the open folder's items in `order`; the item picked stays
     /// picked.
     pub fn sortBy(b: *Browser, order: fs.Order) void {
         b.order = order;
-        const picked: ?[]const u8 = if (b.selected) |i| (if (i < b.listing.entries.len) b.listing.entries[i].name else null) else null;
+        const kept: ?[]const u8 = if (b.selected) |i| (if (i < b.listing.entries.len) b.listing.entries[i].name else null) else null;
         b.listing.sort(order);
-        if (picked) |name| b.selected = for (b.listing.entries, 0..) |e, i| {
+        if (kept) |name| b.selected = for (b.listing.entries, 0..) |e, i| {
             if (e.name.ptr == name.ptr) break i;
         } else null;
     }
@@ -151,12 +288,14 @@ pub const Browser = struct {
         b.listing = fs.Listing.read(b.gpa, new);
         b.listing.sort(b.order);
         b.selected = null;
+        b.ask(.none);
         try b.expandTo(new);
     }
 
     fn activate(b: *Browser, i: usize) !void {
         if (i >= b.listing.entries.len) return;
         const e = b.listing.entries[i];
+        if (b.selected != i) b.ask(.none);
         if (e.kind != .folder) {
             b.closeFile();
             b.selected = i;
@@ -338,4 +477,82 @@ test "the newest first, and the item picked stays picked; and the list" {
     b.request(.{ .layout = .list });
     _ = b.apply();
     try testing.expectEqual(Layout.list, b.layout);
+}
+
+test "making a folder, which is picked; and deleting files, and folders with what is in them" {
+    var t: fs.TestTree = .{};
+    try t.init();
+    defer t.deinit();
+    var b = try Browser.init(testing.allocator, t.path);
+    defer b.deinit();
+    try testing.expect(b.changeable());
+
+    // A name that cannot be, then one that can.
+    b.request(.{ .prompt = .new_folder });
+    _ = b.apply();
+    try testing.expectEqual(Prompt.new_folder, b.prompt);
+    b.setName("A-folder");
+    b.request(.make_folder);
+    _ = b.apply();
+    try testing.expectEqual(Prompt.new_folder, b.prompt);
+    try testing.expectEqualStrings("there is already something with that name", b.failure.?);
+    b.setName("Music");
+    b.request(.make_folder);
+    _ = b.apply();
+    try testing.expectEqual(Prompt.none, b.prompt);
+    try testing.expect(b.failure == null);
+    try testing.expectEqualStrings("Music", b.picked().?.name);
+    // It is in the tree too.
+    try testing.expectEqual(@as(usize, 3), b.subfolders(t.path).len);
+
+    // A folder with things in it says how many, and they go with it; the
+    // folders open in the tree in it close.
+    var buf: [128]u8 = undefined;
+    const music = try std.fmt.bufPrint(&buf, "{s}/Music", .{t.path});
+    try fs.makeFolder(music, "Albums");
+    try t.write("Music/song", "la", 0o644);
+    try b.toggle(music);
+    try testing.expect(b.isExpanded(music));
+    b.request(.{ .prompt = .delete });
+    _ = b.apply();
+    try testing.expectEqual(Prompt.delete, b.prompt);
+    try testing.expectEqual(@as(?usize, 2), b.delete_count);
+    b.request(.delete);
+    _ = b.apply();
+    try testing.expectEqual(Prompt.none, b.prompt);
+    try testing.expect(!b.isExpanded(music));
+    try testing.expectEqual(@as(usize, 5), b.listing.entries.len);
+    try testing.expect(b.selected == null);
+
+    // Picking something else stops asking; a file shown can be deleted.
+    b.request(.{ .activate = 3 });
+    _ = b.apply();
+    b.request(.{ .prompt = .delete });
+    _ = b.apply();
+    try testing.expect(b.delete_count == null);
+    b.request(.{ .activate = 4 });
+    _ = b.apply();
+    try testing.expectEqual(Prompt.none, b.prompt);
+    try testing.expectEqualStrings("c-tool", b.picked().?.name);
+    try testing.expect(b.file != null);
+    b.request(.{ .prompt = .delete });
+    _ = b.apply();
+    b.request(.delete);
+    _ = b.apply();
+    try testing.expect(b.file == null);
+    try testing.expectEqual(@as(usize, 4), b.listing.entries.len);
+
+    // Nothing is asked without something picked; a link to a folder goes,
+    // not the folder.
+    b.request(.{ .prompt = .delete });
+    _ = b.apply();
+    try testing.expectEqual(Prompt.none, b.prompt);
+    try testing.expectEqualStrings("z-link", b.listing.entries[1].name);
+    b.selected = 1;
+    b.request(.{ .prompt = .delete });
+    _ = b.apply();
+    b.request(.delete);
+    _ = b.apply();
+    try testing.expectEqualStrings("A-folder", b.listing.entries[0].name);
+    try testing.expectEqual(@as(usize, 3), b.listing.entries.len);
 }

@@ -3,11 +3,16 @@
 //! button to go up, and buttons for the order of its items and how they
 //! are shown), what is in it as a grid of icons or a list (with when each
 //! was changed, and its size), and a line about the item picked (or how
-//! many there are). The tree and the items scroll.
+//! many there are), with buttons to make a folder and to delete the item
+//! picked. The tree and the items scroll.
 //!
 //! Clicking a folder in the tree or among the items opens it; the arrow
 //! beside a folder in the tree opens or closes it there. Clicking anything
 //! else among the items picks it.
+//!
+//! Making a folder asks for its name in the line at the bottom, and
+//! deleting asks whether to there too, warning that a folder goes with
+//! everything in it.
 
 const std = @import("std");
 const ui = @import("ui");
@@ -148,12 +153,7 @@ pub const Files = struct {
             } }),
         };
 
-        const footer = cx.make(ui.Padding{ .padding = .symmetric(16, 10), .child = cx.make(ui.Text{
-            .text = self.status(cx),
-            .style = .{ .size = 16, .color = t.on_surface_variant },
-            .wrap = false,
-            .ellipsis = true,
-        }) });
+        const footer = cx.make(ui.Padding{ .padding = .symmetric(16, 10), .child = self.bottomLine(cx) });
 
         return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
             cx.make(ui.TitleBar{
@@ -230,6 +230,81 @@ pub const Files = struct {
             .selected = b.selected == i,
             .on_press = callback(cx, .{ .browser = b, .index = i }, Act.activate),
         });
+    }
+
+    /// The line at the bottom: about the item picked (or what is in the
+    /// folder) with the buttons to make a folder and delete the item; or
+    /// asking for the new folder's name, or whether to delete the item.
+    fn bottomLine(self: *const Files, cx: *ui.Context) ui.Widget {
+        const t = cx.theme();
+        const b = self.browser;
+        // In a narrow window, the buttons are their icons alone.
+        const labels = self.width >= 1000;
+        const note_style: ui.TextStyle = .{ .size = 16, .color = t.on_surface_variant };
+        const failure_style: ui.TextStyle = .{ .size = 16, .color = t.@"error" };
+        const cancel = cx.make(ui.OutlinedButton{ .label = if (labels) "Cancel" else "", .icon = .close, .on_press = callback(cx, .{ .browser = b }, Act.cancel) });
+        switch (b.prompt) {
+            .none => return cx.make(ui.Row{ .spacing = 12, .children = &.{
+                cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = self.status(cx), .style = note_style, .wrap = false, .ellipsis = true }) }),
+                cx.make(ui.OutlinedButton{
+                    .label = if (labels) "New folder" else "",
+                    .icon = .create_new_folder,
+                    .on_press = if (b.file == null and b.changeable()) callback(cx, .{ .browser = b }, Act.newFolder) else null,
+                }),
+                cx.make(ui.OutlinedButton{
+                    .label = if (labels) "Delete" else "",
+                    .icon = .delete,
+                    .on_press = if (b.picked() != null and b.changeable()) callback(cx, .{ .browser = b }, Act.askDelete) else null,
+                }),
+            } }),
+            .new_folder => return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .spacing = 8, .children = &.{
+                if (b.failure) |why|
+                    cx.make(ui.Text{ .text = cx.fmt("The folder cannot be made: {s}", .{why}), .style = failure_style, .wrap = false, .ellipsis = true })
+                else
+                    cx.make(ui.Text{ .text = "The new folder's name", .style = note_style, .wrap = false, .ellipsis = true }),
+                cx.make(ui.Row{ .spacing = 12, .children = &.{
+                    cx.make(ui.Expanded{ .child = cx.make(ui.TextField{
+                        .placeholder = "Name",
+                        .width = std.math.inf(f32),
+                        .max_len = ui.TextField.capacity,
+                        .autofocus = true,
+                        .on_changed = nameCallback(cx, b),
+                        .on_submit = callback(cx, .{ .browser = b }, Act.make),
+                    }) }),
+                    cx.make(ui.OutlinedButton{ .label = if (labels) "Make" else "", .icon = .check, .on_press = callback(cx, .{ .browser = b }, Act.make) }),
+                    cancel,
+                } }),
+            } }),
+            .delete => {
+                const e = b.picked() orelse return cx.make(ui.Empty{});
+                // A folder goes with everything in it, and says so.
+                const contents = e.kind == .folder and !e.link and b.delete_count != 0;
+                const question = if (e.kind == .folder and !e.link) (if (b.delete_count) |n| switch (n) {
+                    0 => cx.fmt("Delete the empty folder \u{201c}{s}\u{201d}?", .{e.name}),
+                    1 => cx.fmt("Delete the folder \u{201c}{s}\u{201d} and the 1 item in it? This cannot be undone.", .{e.name}),
+                    else => cx.fmt("Delete the folder \u{201c}{s}\u{201d} and everything in it ({d} items)? This cannot be undone.", .{ e.name, n }),
+                } else cx.fmt("Delete the folder \u{201c}{s}\u{201d} and everything in it? This cannot be undone.", .{e.name})) else if (e.link)
+                    cx.fmt("Delete the link \u{201c}{s}\u{201d}? What it leads to is kept.", .{e.name})
+                else
+                    cx.fmt("Delete \u{201c}{s}\u{201d}? This cannot be undone.", .{e.name});
+                return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .spacing = 8, .children = &.{
+                    cx.make(ui.Row{ .spacing = 8, .children = if (contents) &.{
+                        cx.make(ui.Icon{ .icon = .warning, .size = 20, .color = t.@"error" }),
+                        cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = question, .style = failure_style }) }),
+                    } else &.{
+                        cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = question, .style = .{ .size = 16 } }) }),
+                    } }),
+                    cx.make(ui.Row{ .spacing = 12, .children = &.{
+                        cx.make(ui.Expanded{ .child = if (b.failure) |why|
+                            cx.make(ui.Text{ .text = cx.fmt("It cannot be deleted: {s}", .{why}), .style = failure_style, .wrap = false, .ellipsis = true })
+                        else
+                            cx.make(ui.Empty{}) }),
+                        cx.make(ui.OutlinedButton{ .label = if (labels) "Delete" else "", .icon = .delete, .on_press = callback(cx, .{ .browser = b }, Act.delete) }),
+                        cancel,
+                    } }),
+                } });
+            },
+        }
     }
 
     /// About the item picked, or what is in the folder.
@@ -336,7 +411,38 @@ const Act = struct {
     fn relayout(a: *const Act) void {
         a.browser.request(.{ .layout = if (a.browser.layout == .icons) .list else .icons });
     }
+
+    fn newFolder(a: *const Act) void {
+        a.browser.request(.{ .prompt = .new_folder });
+    }
+
+    fn askDelete(a: *const Act) void {
+        a.browser.request(.{ .prompt = .delete });
+    }
+
+    fn cancel(a: *const Act) void {
+        a.browser.request(.{ .prompt = .none });
+    }
+
+    fn make(a: *const Act) void {
+        a.browser.request(.make_folder);
+    }
+
+    fn delete(a: *const Act) void {
+        a.browser.request(.delete);
+    }
 };
+
+/// The new folder's name goes to the browser as it is typed.
+fn nameCallback(cx: *ui.Context, b: *Browser) ?ui.ValueCallback([]const u8) {
+    const p = cx.ui.arena().create(Act) catch return null;
+    p.* = .{ .browser = b };
+    return .of(p, struct {
+        fn set(a: *const Act, text: []const u8) void {
+            a.browser.setName(text);
+        }
+    }.set);
+}
 
 fn systemCallback(cx: *ui.Context, b: *Browser) ?ui.ValueCallback(bool) {
     const p = cx.ui.arena().create(Act) catch return null;
@@ -834,4 +940,93 @@ test "the order and the layout: the newest first, and a list" {
     click(u, up(findText(u.root.?, "List").?, ui.OutlinedButton).?);
     Frame(u, &b, &n, .{ 1600, 900 });
     try testing.expect(tile(u, "b-file") != null);
+}
+
+test "making a folder, and deleting: asked at the bottom, warning that a folder goes with what is in it" {
+    var t: fs.TestTree = .{};
+    try t.init();
+    defer t.deinit();
+    var b = try Browser.init(testing.allocator, t.path);
+    defer b.deinit();
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    var n: u64 = 0;
+    const Frame = struct {
+        fn draw(uu: *ui.Ui, bb: *Browser, nn: *u64, size: [2]u32) void {
+            _ = bb.apply();
+            nn.* += 1;
+            uu.frame(size[0], size[1], nn.*, Files{ .browser = bb, .width = @floatFromInt(size[0]) });
+        }
+    }.draw;
+    Frame(u, &b, &n, .{ 1600, 900 });
+    // Nothing picked: nothing to delete.
+    const delete_button = up(findText(u.root.?, "Delete").?, ui.OutlinedButton).?;
+    try testing.expect(delete_button.widget.as(ui.OutlinedButton).?.on_press == null);
+
+    // New folder asks for a name, and the field takes the keyboard.
+    click(u, up(findText(u.root.?, "New folder").?, ui.OutlinedButton).?);
+    Frame(u, &b, &n, .{ 1600, 900 });
+    try testing.expect(findText(u.root.?, "The new folder's name") != null);
+    for (test_sizes) |size| {
+        Frame(u, &b, &n, size);
+        try testing.expect(!overflows(u.root.?));
+    }
+    Frame(u, &b, &n, .{ 1600, 900 });
+    try testing.expect(u.focused != null and u.focused.?.widget.is(ui.TextField));
+    // Typing a name and Enter makes the folder, which is picked.
+    u.keyEvent(30, true);
+    u.keyEvent(30, false);
+    u.keyEvent(28, true);
+    Frame(u, &b, &n, .{ 1600, 900 });
+    try testing.expectEqual(browser_mod.Prompt.none, b.prompt);
+    try testing.expectEqualStrings("a", b.picked().?.name);
+    try testing.expect(tile(u, "a") != null);
+
+    // The name of something there already is not taken, and it says why.
+    b.request(.{ .prompt = .new_folder });
+    Frame(u, &b, &n, .{ 1600, 900 });
+    u.keyEvent(30, true);
+    u.keyEvent(28, true);
+    Frame(u, &b, &n, .{ 1600, 900 });
+    try testing.expect(findText(u.root.?, "The folder cannot be made: there is already something with that name") != null);
+    click(u, up(findText(u.root.?, "Cancel").?, ui.OutlinedButton).?);
+    Frame(u, &b, &n, .{ 1600, 900 });
+    try testing.expectEqual(browser_mod.Prompt.none, b.prompt);
+
+    // Deleting a folder with things in it warns that they go too.
+    try t.write("a/one", "1", 0o644);
+    try t.write("a/two", "2", 0o644);
+    click(u, up(findText(u.root.?, "Delete").?, ui.OutlinedButton).?);
+    Frame(u, &b, &n, .{ 1600, 900 });
+    try testing.expect(findText(u.root.?, "Delete the folder \u{201c}a\u{201d} and everything in it (2 items)? This cannot be undone.") != null);
+    try testing.expect(findIcon(u.root.?, .warning) != null);
+    for (test_sizes) |size| {
+        Frame(u, &b, &n, size);
+        try testing.expect(!overflows(u.root.?));
+    }
+    Frame(u, &b, &n, .{ 1600, 900 });
+    // The prompt's Delete button (the one beside Cancel).
+    const cancel = up(findText(u.root.?, "Cancel").?, ui.OutlinedButton).?;
+    const row = cancel.parent.?;
+    click(u, row.children.items[row.children.items.len - 2]);
+    Frame(u, &b, &n, .{ 1600, 900 });
+    try testing.expect(tile(u, "a") == null);
+    try testing.expect(findText(u.root.?, "5 items") != null);
+
+    // An empty folder, a file and a link say so, without the warning.
+    try testing.expectEqualStrings("z-link", b.listing.entries[1].name);
+    b.selected = 1;
+    b.request(.{ .prompt = .delete });
+    Frame(u, &b, &n, .{ 1600, 900 });
+    try testing.expect(findText(u.root.?, "Delete the link \u{201c}z-link\u{201d}? What it leads to is kept.") != null);
+    try testing.expect(findIcon(u.root.?, .warning) == null);
+    b.selected = 0;
+    b.request(.{ .prompt = .delete });
+    Frame(u, &b, &n, .{ 1600, 900 });
+    try testing.expect(findText(u.root.?, "Delete the empty folder \u{201c}A-folder\u{201d}?") != null);
+    b.selected = 2;
+    b.request(.{ .prompt = .delete });
+    Frame(u, &b, &n, .{ 1600, 900 });
+    try testing.expect(findText(u.root.?, "Delete \u{201c}b-file\u{201d}? This cannot be undone.") != null);
 }

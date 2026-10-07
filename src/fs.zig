@@ -220,6 +220,103 @@ pub fn within(path: []const u8, ancestor: []const u8) bool {
     return std.mem.startsWith(u8, path, ancestor) and (path.len == ancestor.len or path[ancestor.len] == '/');
 }
 
+pub const ChangeError = error{
+    /// Not a name a folder can have here.
+    BadName,
+    /// Something of that name is there already.
+    Exists,
+    AccessDenied,
+    /// What was to be deleted is not there any more.
+    NotFound,
+    /// Part of it could not be deleted.
+    NotDeleted,
+    Unexpected,
+};
+
+/// Why a change could not be made, for people.
+pub fn describeError(err: ChangeError) []const u8 {
+    return switch (err) {
+        error.BadName => "use a name without / that does not start with a dot",
+        error.Exists => "there is already something with that name",
+        error.AccessDenied => "you are not allowed to change this folder",
+        error.NotFound => "it is not there any more",
+        error.NotDeleted => "some of what is in it could not be deleted",
+        error.Unexpected => "something went wrong",
+    };
+}
+
+/// Whether `name` can be a new folder's: not empty, no "/", and not
+/// starting with a dot (those are hidden, here).
+pub fn validName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 255 or name[0] == '.') return false;
+    return std.mem.indexOfScalar(u8, name, '/') == null and std.mem.indexOfScalar(u8, name, 0) == null;
+}
+
+/// Makes the folder `name` in the folder at `dir`.
+pub fn makeFolder(dir: []const u8, name: []const u8) ChangeError!void {
+    if (!validName(name)) return error.BadName;
+    var buf: [4096]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ dir, name }) catch return error.BadName;
+    return switch (linux.errno(linux.mkdir(path, 0o755))) {
+        .SUCCESS => {},
+        .EXIST => error.Exists,
+        .ACCES, .PERM, .ROFS => error.AccessDenied,
+        .NOENT => error.NotFound,
+        .NAMETOOLONG => error.BadName,
+        else => error.Unexpected,
+    };
+}
+
+/// Deletes `name` from the folder at `dir`: a file, or a folder and
+/// everything in it. A link is deleted itself, not what it leads to.
+pub fn delete(dir: []const u8, name: []const u8) ChangeError!void {
+    var buf: [4096]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ dir, name }) catch return error.NotFound;
+    var stx: linux.Statx = undefined;
+    switch (linux.errno(linux.statx(linux.AT.FDCWD, path, linux.AT.SYMLINK_NOFOLLOW, .{ .TYPE = true }, &stx))) {
+        .SUCCESS => {},
+        .NOENT => return error.NotFound,
+        else => return error.Unexpected,
+    }
+    if (stx.mode & linux.S.IFMT == linux.S.IFDIR) {
+        sys.files.removeTree(path);
+        // What could not be deleted is still there.
+        return switch (linux.errno(linux.statx(linux.AT.FDCWD, path, linux.AT.SYMLINK_NOFOLLOW, .{ .TYPE = true }, &stx))) {
+            .NOENT => {},
+            .SUCCESS => if (writable(dir)) error.NotDeleted else error.AccessDenied,
+            else => error.Unexpected,
+        };
+    }
+    return switch (linux.errno(linux.unlink(path))) {
+        .SUCCESS => {},
+        .NOENT => error.NotFound,
+        .ACCES, .PERM, .ROFS => error.AccessDenied,
+        else => error.Unexpected,
+    };
+}
+
+/// How many things are in the folder at `path` (hidden ones too), for
+/// saying what deleting it deletes; null if it cannot be read.
+pub fn countItems(path: []const u8) ?usize {
+    var buf: [4096]u8 = undefined;
+    const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return null;
+    const dir = sys.open(z, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }) catch return null;
+    defer sys.close(dir);
+    var count: usize = 0;
+    var dents: [4096]u8 align(8) = undefined;
+    while (true) {
+        const n = sys.check(linux.getdents64(dir, &dents, dents.len)) catch return null;
+        if (n == 0) return count;
+        var at: usize = 0;
+        while (at < n) {
+            const reclen = std.mem.readInt(u16, dents[at + 16 ..][0..2], .little);
+            const name = std.mem.sliceTo(dents[at + 19 .. at + reclen], 0);
+            at += reclen;
+            if (!std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) count += 1;
+        }
+    }
+}
+
 /// A size for people: "512 bytes", "12.3 kB", "4.0 MB".
 pub fn formatSize(buf: []u8, size: u64) []const u8 {
     if (size < 1000) return std.fmt.bufPrint(buf, "{d} {s}", .{ size, if (size == 1) "byte" else "bytes" }) catch "";
@@ -337,7 +434,7 @@ pub const TestTree = struct {
         _ = linux.symlink("nowhere", try std.fmt.bufPrintZ(&z, "{s}/broken", .{t.path}));
     }
 
-    fn write(t: *TestTree, name: []const u8, data: []const u8, mode: linux.mode_t) !void {
+    pub fn write(t: *TestTree, name: []const u8, data: []const u8, mode: linux.mode_t) !void {
         var z: [128]u8 = undefined;
         const fd = try sys.open(try std.fmt.bufPrintZ(&z, "{s}/{s}", .{ t.path, name }), .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true });
         defer sys.close(fd);
@@ -347,11 +444,7 @@ pub const TestTree = struct {
 
     pub fn deinit(t: *TestTree) void {
         var z: [128]u8 = undefined;
-        for ([_][]const u8{ "b-file", "c-tool", ".hidden", "z-link", "broken" }) |name| {
-            _ = linux.unlink(std.fmt.bufPrintZ(&z, "{s}/{s}", .{ t.path, name }) catch continue);
-        }
-        _ = linux.rmdir(std.fmt.bufPrintZ(&z, "{s}/A-folder", .{t.path}) catch return);
-        _ = linux.rmdir(std.fmt.bufPrintZ(&z, "{s}", .{t.path}) catch return);
+        sys.files.removeTree(std.fmt.bufPrintZ(&z, "{s}", .{t.path}) catch return);
     }
 };
 
@@ -398,4 +491,33 @@ test "a listing has folders first, then files by name, with their kinds" {
     defer missing.deinit();
     try testing.expectEqual(@as(?sys.Error, error.NotFound), missing.err);
     try testing.expectEqual(@as(usize, 0), missing.entries.len);
+}
+
+test "making folders, and deleting files, links and folders with what is in them" {
+    var t: TestTree = .{};
+    try t.init();
+    defer t.deinit();
+    try testing.expect(!validName(""));
+    try testing.expect(!validName(".hidden"));
+    try testing.expect(!validName("a/b"));
+    try testing.expect(validName("Holiday photos"));
+    try makeFolder(t.path, "New");
+    try testing.expectError(error.Exists, makeFolder(t.path, "New"));
+    try testing.expectError(error.BadName, makeFolder(t.path, "../escape"));
+    var buf: [128]u8 = undefined;
+    const new = try std.fmt.bufPrint(&buf, "{s}/New", .{t.path});
+    try makeFolder(new, "inner");
+    try t.write("New/inner/note", "hi", 0o644);
+    try t.write("New/.dot", "", 0o644);
+    try testing.expectEqual(@as(?usize, 2), countItems(new));
+    // A link to a folder goes, and the folder stays.
+    try delete(t.path, "z-link");
+    try testing.expectEqual(@as(?usize, 0), countItems(try std.fmt.bufPrint(&buf, "{s}/A-folder", .{t.path})));
+    try delete(t.path, "New");
+    try testing.expectError(error.NotFound, delete(t.path, "New"));
+    try delete(t.path, "b-file");
+    try delete(t.path, "broken");
+    var l = Listing.read(testing.allocator, t.path);
+    defer l.deinit();
+    try testing.expectEqual(@as(usize, 2), l.entries.len);
 }
