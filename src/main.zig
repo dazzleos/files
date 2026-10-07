@@ -37,9 +37,7 @@ const key_escape = 1;
 
 var frame: vc4.render.Frame = undefined;
 
-/// How long copying works each time round the loop, and how often the
-/// progress is drawn.
-const copy_slice_ns = 30 * std.time.ns_per_ms;
+/// How often the progress of a copy is drawn.
 const progress_ns = 250 * std.time.ns_per_ms;
 
 pub fn main(init: std.process.Init.Minimal) u8 {
@@ -96,7 +94,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         const waited = if (idle) blk: {
             // Nothing changes on its own: wait for input (or a widget's
             // animation).
-            const timeout: u64 = if (window_ui.needs_frame and !suspended) 16 * std.time.ns_per_ms else 60 * std.time.ns_per_s;
+            const timeout: u64 = if (window_ui.needs_frame and !suspended) 16 * std.time.ns_per_ms else if (browser.copying()) progress_ns else 60 * std.time.ns_per_s;
             break :blk win.wait(timeout);
         } else win.poll();
         waited catch |err| {
@@ -148,13 +146,10 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         if (browser.apply()) dirty = true;
 
         idle = true;
-        // Copying, a little each time round: the window is drawn again
-        // (to say how far it has got) a few times a second.
+        // Copying (on its own thread): the window is drawn again, to say
+        // how far it has got, a few times a second, and when it is done.
         if (browser.copying()) {
-            const was = browser.copying();
-            _ = browser.work(copy_slice_ns);
-            idle = false;
-            if (now >= last_progress + progress_ns or was != browser.copying()) {
+            if (!browser.poll() or now >= last_progress + progress_ns) {
                 last_progress = now;
                 dirty = true;
             }

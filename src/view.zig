@@ -271,10 +271,11 @@ pub const Files = struct {
             const verb = if (c.move) "Moving" else "Copying";
             var done_buf: [32]u8 = undefined;
             var total_buf: [32]u8 = undefined;
-            const text = if (c.phase == .scan)
+            const p = c.progress();
+            const text = if (p.counting)
                 cx.fmt("{s} \u{201c}{s}\u{201d}\u{2026}", .{ verb, c.name })
             else
-                cx.fmt("{s} \u{201c}{s}\u{201d}: {s} of {s}", .{ verb, c.name, fs.formatSize(&done_buf, c.done_bytes), fs.formatSize(&total_buf, c.total_bytes) });
+                cx.fmt("{s} \u{201c}{s}\u{201d}: {s} of {s}", .{ verb, c.name, fs.formatSize(&done_buf, p.done), fs.formatSize(&total_buf, p.total) });
             return cx.make(ui.Row{ .spacing = 12, .children = &.{
                 cx.make(ui.Spinner{ .size = 20 }),
                 cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = text, .style = note_style, .wrap = false, .ellipsis = true }) }),
@@ -1336,7 +1337,7 @@ test "copying and pasting from the menu, and dragging onto folders" {
     const Frame = struct {
         fn draw(uu: *ui.Ui, bb: *Browser, nn: *u64, size: [2]u32) void {
             _ = bb.apply();
-            while (bb.work(std.time.ns_per_ms)) {}
+            while (bb.poll()) sys.sleepMs(1);
             nn.* += 1;
             uu.frame(size[0], size[1], nn.*, Files{ .browser = bb, .width = @floatFromInt(size[0]) });
         }
@@ -1394,10 +1395,11 @@ test "copying and pasting from the menu, and dragging onto folders" {
     const big = for (b.listing.entries, 0..) |e, i| {
         if (std.mem.eql(u8, e.name, "big")) break i;
     } else unreachable;
+    @import("copier.zig").test_chunk_delay_ms = 20;
+    defer @import("copier.zig").test_chunk_delay_ms = 0;
     b.request(.{ .drop = .{ .index = big, .into = folder, .copy = true } });
     _ = b.apply();
-    _ = b.work(0);
-    _ = b.work(0);
+    while (b.copier.?.progress().done == 0) sys.sleepMs(1);
     for (test_sizes) |size| {
         n += 1;
         u.frame(size[0], size[1], n, Files{ .browser = &b, .width = @floatFromInt(size[0]) });

@@ -340,12 +340,12 @@ pub const Browser = struct {
         if (c.done()) b.finishCopy();
     }
 
-    /// Copies for about `budget_ns`, if something is being copied.
-    /// Returns whether something is.
-    pub fn work(b: *Browser, budget_ns: u64) bool {
+    /// Finishes off the copy if it has finished. Returns whether
+    /// something is (still) being copied.
+    pub fn poll(b: *Browser) bool {
         const c = b.copier orelse return false;
-        if (c.step(budget_ns)) b.finishCopy();
-        return true;
+        if (c.done()) b.finishCopy();
+        return b.copier != null;
     }
 
     fn finishCopy(b: *Browser) void {
@@ -875,7 +875,7 @@ test "USB drives: opened like the user's files, ejected, and gone" {
 }
 
 fn finish(b: *Browser) void {
-    while (b.work(std.time.ns_per_ms)) {}
+    while (b.poll()) sys.sleepMs(1);
 }
 
 test "copying and pasting, cutting and pasting, and dropping onto a folder" {
@@ -953,6 +953,8 @@ test "cancelling a copy" {
     try t.init();
     defer t.deinit();
     try t.write("big", "z" ** (1024 * 1024), 0o644);
+    copier.test_chunk_delay_ms = 20;
+    defer copier.test_chunk_delay_ms = 0;
     var b = try Browser.init(testing.allocator, t.path);
     defer b.deinit();
     const big = for (b.listing.entries, 0..) |e, i| {
@@ -961,8 +963,6 @@ test "cancelling a copy" {
     var buf: [128]u8 = undefined;
     b.request(.{ .drop = .{ .index = big, .into = try std.fmt.bufPrint(&buf, "{s}/A-folder", .{t.path}), .copy = true } });
     _ = b.apply();
-    _ = b.work(0);
-    _ = b.work(0);
     try testing.expect(b.copying());
     b.request(.cancel_copy);
     _ = b.apply();

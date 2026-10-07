@@ -1,13 +1,14 @@
 //! Copying and moving a file or folder (and everything in it) into a
-//! folder, a little at a time (`step`), so the window keeps responding
-//! while a big copy goes to a slow USB drive.
+//! folder, on a thread of its own, so the window keeps responding while a
+//! big copy goes to a slow USB drive. The window reads how far it has got
+//! (`progress`), and can ask it to stop (`cancel`).
 //!
 //! A move within a filesystem is a rename, done at once. Otherwise
-//! everything is copied: first what there is is listed (and its size
-//! added up, for the progress), then folders are made and files copied
-//! (with their permissions and when they were changed), and links are made
-//! again as links. A move then deletes what was copied, if all of it was.
-//! Devices and the like are left out.
+//! everything is copied: first what there is is added up (for the
+//! progress), then folders are made and files copied (with their
+//! permissions and when they were changed), and links are made again as
+//! links. A move then deletes what was copied, if all of it was. Devices
+//! and the like are left out.
 //!
 //! What is made is named as the original, or, if something of that name
 //! is there already, "<name> (copy)", "<name> (copy 2)" and so on: nothing
@@ -17,6 +18,8 @@ const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
 const fs = @import("fs.zig");
+
+const Atomic = std.atomic.Value;
 
 pub const Error = error{
     /// Into itself (or a folder in it).
@@ -38,39 +41,31 @@ pub fn describeError(err: Error) []const u8 {
     };
 }
 
-const Kind = enum { folder, file, link, other };
-
-/// Something to copy: where it is under what is copied ("" for that
-/// itself).
-const Item = struct {
-    rel: []const u8,
-    kind: Kind,
-    size: u64,
-    mode: u32,
-    mtime: linux.statx_timestamp,
-};
-
 const chunk = 256 * 1024;
 
+/// For tests: a pause after each chunk copied, to stop in the middle.
+pub var test_chunk_delay_ms: u32 = 0;
+
 pub const Copier = struct {
-    arena: std.heap.ArenaAllocator,
-    /// What is copied (or moved), and the folder it goes into.
-    source: []const u8,
-    into: []const u8,
-    /// The name it has there.
-    name: []const u8,
+    gpa: std.mem.Allocator,
+    /// What is copied (or moved), the folder it goes into, and the name it
+    /// has there.
+    source: []u8,
+    into: []u8,
+    name: []u8,
     move: bool,
-    phase: enum { scan, copy, remove, done } = .scan,
-    items: std.ArrayList(Item) = .empty,
-    /// Folders still to be listed (indexes into `items`).
-    to_scan: std.ArrayList(usize) = .empty,
-    /// The next item to copy, and the file being copied, if one is.
-    next: usize = 0,
-    file: ?struct { src: linux.fd_t, dst: linux.fd_t, item: usize } = null,
-    buf: ?[]u8 = null,
-    /// How far it has got.
-    total_bytes: u64 = 0,
-    done_bytes: u64 = 0,
+    thread: ?std.Thread = null,
+
+    // Shared with the thread.
+    /// Still adding up what there is to copy.
+    counting: Atomic(bool) = .init(true),
+    /// In KiB (the Pi 1 has no 64-bit atomics), rounded up per file.
+    total_kib: Atomic(u32) = .init(0),
+    done_kib: Atomic(u32) = .init(0),
+    finished: Atomic(bool) = .init(false),
+    stop: Atomic(bool) = .init(false),
+
+    // The thread's, read once it has finished.
     /// What could not be copied (other than what stops it all, `err`).
     skipped: usize = 0,
     err: ?Error = null,
@@ -79,21 +74,24 @@ pub const Copier = struct {
     /// Starts copying (or moving) `source` into the folder `into`.
     pub fn start(gpa: std.mem.Allocator, source: []const u8, into: []const u8, move: bool) Error!*Copier {
         if (fs.within(into, source)) return error.IntoItself;
+        if (stat(source) == null) return error.NotFound;
         const c = gpa.create(Copier) catch return error.Unexpected;
-        c.* = .{ .arena = .init(gpa), .source = "", .into = "", .name = "", .move = move };
+        c.* = .{ .gpa = gpa, .source = &.{}, .into = &.{}, .name = &.{}, .move = move };
         errdefer c.deinit();
-        const a = c.arena.allocator();
-        c.source = a.dupe(u8, source) catch return error.Unexpected;
-        c.into = a.dupe(u8, into) catch return error.Unexpected;
-        const top = stat(source) orelse return error.NotFound;
-        c.name = freeName(a, into, fs.baseName(source)) catch return error.Unexpected;
+        c.source = gpa.dupe(u8, source) catch return error.Unexpected;
+        c.into = gpa.dupe(u8, into) catch return error.Unexpected;
+        c.name = freeName(gpa, into, fs.baseName(source)) catch return error.Unexpected;
         // Moving within a filesystem: renamed, and done.
         if (move) {
-            const from = a.dupeZ(u8, source) catch return error.Unexpected;
-            const to = c.path("") catch return error.Unexpected;
+            const dest = fs.join(gpa, into, c.name) catch return error.Unexpected;
+            defer gpa.free(dest);
+            var from_buf: [4096]u8 = undefined;
+            var to_buf: [4096]u8 = undefined;
+            const from = std.fmt.bufPrintZ(&from_buf, "{s}", .{source}) catch return error.Unexpected;
+            const to = std.fmt.bufPrintZ(&to_buf, "{s}", .{dest}) catch return error.Unexpected;
             switch (linux.errno(linux.rename(from, to))) {
                 .SUCCESS => {
-                    c.phase = .done;
+                    c.finish();
                     return c;
                 },
                 .XDEV => {},
@@ -102,209 +100,182 @@ pub const Copier = struct {
                 else => return error.Unexpected,
             }
         }
-        c.items.append(a, top.item("")) catch return error.Unexpected;
-        c.total_bytes = top.item("").size;
-        if (top.kind == .folder) c.to_scan.append(a, 0) catch return error.Unexpected;
+        c.thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, run, .{c}) catch return error.Unexpected;
         return c;
     }
 
+    /// Waits for the thread (stopping it first), and frees everything.
     pub fn deinit(c: *Copier) void {
-        c.closeFile(false);
-        const gpa = c.arena.child_allocator;
-        c.arena.deinit();
+        if (c.thread) |t| {
+            c.stop.store(true, .release);
+            t.join();
+        }
+        const gpa = c.gpa;
+        gpa.free(c.source);
+        gpa.free(c.into);
+        gpa.free(c.name);
         gpa.destroy(c);
     }
 
     pub fn done(c: *const Copier) bool {
-        return c.phase == .done;
+        return c.finished.load(.acquire);
     }
 
-    /// Stops; a file part copied is deleted (what was copied before stays).
+    /// Asks it to stop; a file part copied is deleted (what was copied
+    /// before stays).
     pub fn cancel(c: *Copier) void {
-        if (c.phase != .done) c.cancelled = true;
-        c.closeFile(true);
-        c.phase = .done;
+        c.stop.store(true, .release);
     }
 
-    /// Works for about `budget_ns`. Returns whether it has finished.
-    pub fn step(c: *Copier, budget_ns: u64) bool {
-        const end = sys.nowNs() + budget_ns;
-        // At least one piece of work, however short the time.
-        while (c.phase != .done) {
-            c.work();
-            if (sys.nowNs() >= end) break;
-        }
-        return c.phase == .done;
+    /// Bytes copied, and of how many (while `counting`, not all yet), to
+    /// the KiB.
+    pub fn progress(c: *const Copier) struct { done: u64, total: u64, counting: bool } {
+        return .{ .done = @as(u64, c.done_kib.load(.monotonic)) * 1024, .total = @as(u64, c.total_kib.load(.monotonic)) * 1024, .counting = c.counting.load(.monotonic) };
     }
 
-    fn work(c: *Copier) void {
-        switch (c.phase) {
-            .scan => c.scanOne(),
-            .copy => c.copyOne(),
-            .remove => {
-                // Everything was copied: the original goes.
-                if (c.skipped == 0) fs.delete(fs.parent(c.source), fs.baseName(c.source)) catch |err| {
-                    c.err = switch (err) {
-                        error.AccessDenied => error.AccessDenied,
-                        else => error.Unexpected,
-                    };
-                };
-                c.phase = .done;
-            },
-            .done => {},
-        }
+    fn finish(c: *Copier) void {
+        c.counting.store(false, .monotonic);
+        c.finished.store(true, .release);
     }
 
-    /// Lists one folder.
-    fn scanOne(c: *Copier) void {
-        const index = c.to_scan.pop() orelse {
-            c.phase = .copy;
-            return;
-        };
-        const a = c.arena.allocator();
-        const rel = c.items.items[index].rel;
-        const dir_path = (if (rel.len == 0) a.dupeZ(u8, c.source) else std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ c.source, rel }, 0)) catch return c.fail(error.Unexpected);
-        const dir = sys.open(dir_path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }) catch {
-            c.skipped += 1;
-            return;
-        };
-        defer sys.close(dir);
-        var dents: [4096]u8 align(8) = undefined;
-        while (true) {
-            const n = sys.check(linux.getdents64(dir, &dents, dents.len)) catch break;
-            if (n == 0) break;
-            var at: usize = 0;
-            while (at < n) {
-                const reclen = std.mem.readInt(u16, dents[at + 16 ..][0..2], .little);
-                const name = std.mem.sliceTo(dents[at + 19 .. at + reclen], 0);
-                at += reclen;
-                if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
-                const child = (if (rel.len == 0) a.dupe(u8, name) else std.fmt.allocPrint(a, "{s}/{s}", .{ rel, name })) catch return c.fail(error.Unexpected);
-                const full = std.fmt.allocPrint(a, "{s}/{s}", .{ c.source, child }) catch return c.fail(error.Unexpected);
-                const st = stat(full) orelse {
-                    c.skipped += 1;
-                    continue;
-                };
-                const item = st.item(child);
-                c.items.append(a, item) catch return c.fail(error.Unexpected);
-                c.total_bytes += item.size;
-                if (item.kind == .folder) c.to_scan.append(a, c.items.items.len - 1) catch return c.fail(error.Unexpected);
-            }
-        }
+    fn stopping(c: *Copier) bool {
+        return c.stop.load(.acquire);
     }
 
-    /// Copies (a chunk of) the next item.
-    fn copyOne(c: *Copier) void {
-        if (c.file != null) return c.copyChunk();
-        if (c.next == c.items.items.len) {
-            c.phase = if (c.move) .remove else .done;
+    /// The thread: counts, copies, and (for a move) deletes the original.
+    fn run(c: *Copier) void {
+        defer c.finish();
+        var arena: std.heap.ArenaAllocator = .init(c.gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        c.count(a, c.source);
+        c.counting.store(false, .monotonic);
+        const dest = fs.join(a, c.into, c.name) catch return c.fail(error.Unexpected);
+        const buf = a.alloc(u8, chunk) catch return c.fail(error.Unexpected);
+        c.copy(a, c.source, dest, buf, true);
+        if (c.stopping() and c.err == null) {
+            c.cancelled = true;
             return;
         }
-        const index = c.next;
-        c.next += 1;
-        const item = c.items.items[index];
-        const a = c.arena.allocator();
-        const dst = c.path(item.rel) catch return c.fail(error.Unexpected);
-        const src = (if (item.rel.len == 0) a.dupeZ(u8, c.source) else std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ c.source, item.rel }, 0)) catch return c.fail(error.Unexpected);
-        switch (item.kind) {
-            .folder => switch (linux.errno(linux.mkdir(dst, item.mode | 0o700))) {
-                .SUCCESS => {},
-                else => |e| if (index == 0) return c.fail(errorFrom(e)) else {
-                    c.skipped += 1;
-                },
-            },
-            .file => {
-                const from = sys.open(src, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }) catch {
-                    c.skipped += 1;
-                    return;
-                };
-                const rc = linux.open(dst, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true }, item.mode);
-                if (linux.errno(rc) != .SUCCESS) {
-                    sys.close(from);
-                    if (index == 0 or linux.errno(rc) == .NOSPC) return c.fail(errorFrom(linux.errno(rc)));
-                    c.skipped += 1;
-                    return;
-                }
-                c.file = .{ .src = from, .dst = @intCast(rc), .item = index };
-                c.copyChunk();
-            },
-            .link => {
-                var target: [4096]u8 = undefined;
-                const n = sys.check(linux.readlink(src, &target, target.len - 1)) catch {
-                    c.skipped += 1;
-                    return;
-                };
-                target[n] = 0;
-                // Not every filesystem has links (FAT has none).
-                if (linux.errno(linux.symlink(target[0..n :0], dst)) != .SUCCESS) c.skipped += 1;
-            },
-            .other => c.skipped += 1,
-        }
-    }
-
-    fn copyChunk(c: *Copier) void {
-        const f = c.file.?;
-        const buf = c.buf orelse blk: {
-            const b = c.arena.allocator().alloc(u8, chunk) catch return c.fail(error.Unexpected);
-            c.buf = b;
-            break :blk b;
+        // Everything was copied: the original goes.
+        if (c.move and c.err == null and c.skipped == 0) fs.delete(fs.parent(c.source), fs.baseName(c.source)) catch |err| {
+            c.err = if (err == error.AccessDenied) error.AccessDenied else error.Unexpected;
         };
-        const n = linux.read(f.src, buf.ptr, buf.len);
-        if (linux.errno(n) != .SUCCESS) {
-            c.skipped += 1;
-            return c.closeFile(true);
-        }
-        if (n == 0) {
-            // All of it: as the original was.
-            const item = c.items.items[f.item];
-            const sec = std.math.lossyCast(isize, item.mtime.sec);
-            const times = [2]linux.timespec{ .{ .sec = sec, .nsec = @intCast(item.mtime.nsec) }, .{ .sec = sec, .nsec = @intCast(item.mtime.nsec) } };
-            _ = linux.futimens(f.dst, &times);
-            return c.closeFile(false);
-        }
-        var written: usize = 0;
-        while (written < n) {
-            const w = linux.write(f.dst, buf[written..].ptr, n - written);
-            switch (linux.errno(w)) {
-                .SUCCESS => written += w,
-                .INTR => {},
-                else => |e| {
-                    c.closeFile(true);
-                    if (e == .NOSPC) return c.fail(error.NoSpace);
-                    c.skipped += 1;
-                    return;
-                },
-            }
-        }
-        c.done_bytes += n;
-    }
-
-    /// Closes the file being copied (deleting what was written of it, if
-    /// `discard`).
-    fn closeFile(c: *Copier, discard: bool) void {
-        const f = c.file orelse return;
-        c.file = null;
-        sys.close(f.src);
-        sys.close(f.dst);
-        if (discard) if (c.path(c.items.items[f.item].rel)) |p| {
-            _ = linux.unlink(p);
-        } else |_| {};
     }
 
     fn fail(c: *Copier, err: Error) void {
-        c.closeFile(true);
-        c.err = err;
-        c.phase = .done;
+        if (c.err == null) c.err = err;
+        c.stop.store(true, .release);
     }
 
-    /// Where `rel` (under what is copied) goes.
-    fn path(c: *Copier, rel: []const u8) ![:0]const u8 {
-        const a = c.arena.allocator();
-        const top = if (std.mem.eql(u8, c.into, "/")) "" else c.into;
-        if (rel.len == 0) return std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ top, c.name }, 0);
-        return std.fmt.allocPrintSentinel(a, "{s}/{s}/{s}", .{ top, c.name, rel }, 0);
+    fn skip(c: *Copier) void {
+        c.skipped += 1;
+    }
+
+    /// Adds up the bytes of the files at and in `path`.
+    fn count(c: *Copier, a: std.mem.Allocator, path: []const u8) void {
+        if (c.stopping()) return;
+        const st = stat(path) orelse return;
+        switch (st.kind) {
+            .file => _ = c.total_kib.fetchAdd(kib(st.size), .monotonic),
+            .folder => {
+                const names = list(a, path) catch return;
+                for (names) |name| {
+                    const child = fs.join(a, path, name) catch return;
+                    c.count(a, child);
+                }
+            },
+            else => {},
+        }
+    }
+
+    /// Copies what is at `from` to `to` (a folder with what is in it). The
+    /// top (`top`) failing stops everything; anything in it failing is
+    /// left out.
+    fn copy(c: *Copier, a: std.mem.Allocator, from: []const u8, to: []const u8, buf: []u8, top: bool) void {
+        if (c.stopping()) return;
+        const st = stat(from) orelse return if (top) c.fail(error.NotFound) else c.skip();
+        var to_buf: [4096]u8 = undefined;
+        var from_buf: [4096]u8 = undefined;
+        const to_z = std.fmt.bufPrintZ(&to_buf, "{s}", .{to}) catch return c.skip();
+        const from_z = std.fmt.bufPrintZ(&from_buf, "{s}", .{from}) catch return c.skip();
+        switch (st.kind) {
+            .folder => {
+                switch (linux.errno(linux.mkdir(to_z, st.mode | 0o700))) {
+                    .SUCCESS => {},
+                    else => |e| return if (top or e == .NOSPC) c.fail(errorFrom(e)) else c.skip(),
+                }
+                const names = list(a, from) catch return c.skip();
+                for (names) |name| {
+                    const f = fs.join(a, from, name) catch return c.fail(error.Unexpected);
+                    const t = fs.join(a, to, name) catch return c.fail(error.Unexpected);
+                    c.copy(a, f, t, buf, false);
+                }
+            },
+            .file => c.copyFile(from_z, to_z, st, buf, top),
+            .link => {
+                var target: [4096]u8 = undefined;
+                const n = sys.check(linux.readlink(from_z, &target, target.len - 1)) catch return c.skip();
+                target[n] = 0;
+                // Not every filesystem has links (FAT has none).
+                if (linux.errno(linux.symlink(target[0..n :0], to_z)) != .SUCCESS) c.skip();
+            },
+            .other => c.skip(),
+        }
+    }
+
+    fn copyFile(c: *Copier, from: [:0]const u8, to: [:0]const u8, st: Stat, buf: []u8, top: bool) void {
+        const src = sys.open(from, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }) catch return if (top) c.fail(error.AccessDenied) else c.skip();
+        defer sys.close(src);
+        const rc = linux.open(to, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true }, st.mode);
+        switch (linux.errno(rc)) {
+            .SUCCESS => {},
+            else => |e| return if (top or e == .NOSPC) c.fail(errorFrom(e)) else c.skip(),
+        }
+        const dst: linux.fd_t = @intCast(rc);
+        var whole = false;
+        defer {
+            sys.close(dst);
+            // A file part copied goes.
+            if (!whole) _ = linux.unlink(to);
+        }
+        var copied: u64 = 0;
+        var reported: u32 = 0;
+        while (true) {
+            if (c.stopping()) return;
+            const n = linux.read(src, buf.ptr, buf.len);
+            if (linux.errno(n) != .SUCCESS) return c.skip();
+            if (n == 0) break;
+            var written: usize = 0;
+            while (written < n) {
+                const w = linux.write(dst, buf[written..].ptr, n - written);
+                switch (linux.errno(w)) {
+                    .SUCCESS => written += w,
+                    .INTR => {},
+                    .NOSPC => return c.fail(error.NoSpace),
+                    else => return c.skip(),
+                }
+            }
+            copied += n;
+            const now = kib(copied);
+            _ = c.done_kib.fetchAdd(now - reported, .monotonic);
+            reported = now;
+            if (test_chunk_delay_ms > 0) sys.sleepMs(test_chunk_delay_ms);
+        }
+        // All of it: as the original was.
+        const sec = std.math.lossyCast(isize, st.mtime.sec);
+        const times = [2]linux.timespec{ .{ .sec = sec, .nsec = @intCast(st.mtime.nsec) }, .{ .sec = sec, .nsec = @intCast(st.mtime.nsec) } };
+        _ = linux.futimens(dst, &times);
+        whole = true;
     }
 };
+
+/// Bytes in KiB, rounded up.
+fn kib(bytes: u64) u32 {
+    return std.math.lossyCast(u32, (bytes + 1023) / 1024);
+}
+
+const Kind = enum { folder, file, link, other };
 
 /// What is at a path (not following links).
 const Stat = struct {
@@ -312,10 +283,6 @@ const Stat = struct {
     size: u64,
     mode: u32,
     mtime: linux.statx_timestamp,
-
-    fn item(s: Stat, rel: []const u8) Item {
-        return .{ .rel = rel, .kind = s.kind, .size = if (s.kind == .file) s.size else 0, .mode = s.mode, .mtime = s.mtime };
-    }
 };
 
 fn stat(path: []const u8) ?Stat {
@@ -332,6 +299,28 @@ fn stat(path: []const u8) ?Stat {
     return .{ .kind = kind, .size = stx.size, .mode = stx.mode & 0o777, .mtime = stx.mtime };
 }
 
+/// The names in the folder at `path` (in `a`).
+fn list(a: std.mem.Allocator, path: []const u8) ![]const []const u8 {
+    var buf: [4096]u8 = undefined;
+    const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return error.NameTooLong;
+    const dir = try sys.open(z, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true });
+    defer sys.close(dir);
+    var names: std.ArrayList([]const u8) = .empty;
+    var dents: [4096]u8 align(8) = undefined;
+    while (true) {
+        const n = try sys.check(linux.getdents64(dir, &dents, dents.len));
+        if (n == 0) return names.items;
+        var at: usize = 0;
+        while (at < n) {
+            const reclen = std.mem.readInt(u16, dents[at + 16 ..][0..2], .little);
+            const name = std.mem.sliceTo(dents[at + 19 .. at + reclen], 0);
+            at += reclen;
+            if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+            try names.append(a, try a.dupe(u8, name));
+        }
+    }
+}
+
 fn errorFrom(e: linux.E) Error {
     return switch (e) {
         .NOSPC => error.NoSpace,
@@ -342,17 +331,19 @@ fn errorFrom(e: linux.E) Error {
 }
 
 /// `name`, or "<name> (copy)", "<name> (copy 2)"..., whichever is not in
-/// the folder `dir` yet.
-pub fn freeName(a: std.mem.Allocator, dir: []const u8, name: []const u8) ![]const u8 {
+/// the folder `dir` yet (in `gpa`).
+pub fn freeName(gpa: std.mem.Allocator, dir: []const u8, name: []const u8) ![]u8 {
     var n: usize = 1;
     while (n < 1000) : (n += 1) {
         const candidate = switch (n) {
-            1 => try a.dupe(u8, name),
-            2 => try std.fmt.allocPrint(a, "{s} (copy)", .{name}),
-            else => try std.fmt.allocPrint(a, "{s} (copy {d})", .{ name, n - 1 }),
+            1 => try gpa.dupe(u8, name),
+            2 => try std.fmt.allocPrint(gpa, "{s} (copy)", .{name}),
+            else => try std.fmt.allocPrint(gpa, "{s} (copy {d})", .{ name, n - 1 }),
         };
-        const full = try fs.join(a, dir, candidate);
+        const full = try fs.join(gpa, dir, candidate);
+        defer gpa.free(full);
         if (stat(full) == null) return candidate;
+        gpa.free(candidate);
     }
     return error.OutOfMemory;
 }
@@ -373,20 +364,21 @@ fn device(path: []const u8) ?[2]u32 {
     return .{ stx.dev_major, stx.dev_minor };
 }
 
+/// Waits for a copy to finish (for tests).
+pub fn wait(c: *const Copier) void {
+    while (!c.done()) sys.sleepMs(1);
+}
+
 // --- Tests -------------------------------------------------------------------
 
 const testing = std.testing;
-
-fn run(c: *Copier) void {
-    while (!c.step(std.time.ns_per_ms)) {}
-}
 
 fn readAll(buf: []u8, path: []const u8) ![]const u8 {
     var z: [256]u8 = undefined;
     return sys.readFile(try std.fmt.bufPrintZ(&z, "{s}", .{path}), buf) orelse error.NotFound;
 }
 
-test "copying a folder with what is in it, under a free name, a little at a time" {
+test "copying a folder with what is in it, under a free name" {
     var t: fs.TestTree = .{};
     try t.init();
     defer t.deinit();
@@ -402,13 +394,14 @@ test "copying a folder with what is in it, under a free name, a little at a time
     const c = try Copier.start(testing.allocator, folder, t.path, false);
     defer c.deinit();
     try testing.expectEqualStrings("A-folder (copy)", c.name);
-    var steps: usize = 0;
-    while (!c.step(0)) steps += 1;
-    try testing.expect(steps > 4);
+    wait(c);
     try testing.expect(c.err == null);
     try testing.expectEqual(@as(usize, 0), c.skipped);
-    try testing.expectEqual(@as(u64, chunk + 12), c.total_bytes);
-    try testing.expectEqual(c.total_bytes, c.done_bytes);
+    const p = c.progress();
+    // big and run, in KiB.
+    try testing.expectEqual(@as(u64, (chunk / 1024 + 1 + 1) * 1024), p.total);
+    try testing.expectEqual(p.total, p.done);
+    try testing.expect(!p.counting);
     var out: [chunk + 64]u8 = undefined;
     var pbuf: [256]u8 = undefined;
     try testing.expectEqual(@as(usize, chunk + 10), (try readAll(&out, try std.fmt.bufPrint(&pbuf, "{s}/A-folder (copy)/inner/big", .{t.path}))).len);
@@ -423,10 +416,11 @@ test "copying a folder with what is in it, under a free name, a little at a time
     const c2 = try Copier.start(testing.allocator, folder, t.path, false);
     defer c2.deinit();
     try testing.expectEqualStrings("A-folder (copy 2)", c2.name);
+    wait(c2);
     try testing.expectError(error.IntoItself, Copier.start(testing.allocator, folder, try std.fmt.bufPrint(&pbuf, "{s}/inner", .{folder}), false));
 }
 
-test "moving within a filesystem renames; cancelling leaves no part of a file" {
+test "moving within a filesystem renames; stopping leaves no part of a file" {
     var t: fs.TestTree = .{};
     try t.init();
     defer t.deinit();
@@ -443,16 +437,15 @@ test "moving within a filesystem renames; cancelling leaves no part of a file" {
     try testing.expectEqualStrings("hello", try readAll(&out, try std.fmt.bufPrint(&pbuf, "{s}/b-file", .{into})));
     try testing.expect(stat(file) == null);
 
-    try t.write("big", "y" ** (3 * chunk), 0o644);
+    try t.write("big", "y" ** (8 * chunk), 0o644);
     const big = try std.fmt.bufPrint(&buf, "{s}/big", .{t.path});
+    test_chunk_delay_ms = 20;
+    defer test_chunk_delay_ms = 0;
     const c = try Copier.start(testing.allocator, big, into, false);
     defer c.deinit();
-    // Scanned, then one chunk copied.
-    _ = c.step(0);
-    _ = c.step(0);
-    _ = c.step(0);
-    try testing.expect(c.file != null);
+    while (c.progress().done == 0) sys.sleepMs(1);
     c.cancel();
+    wait(c);
+    try testing.expect(c.cancelled);
     try testing.expect(stat(try std.fmt.bufPrint(&pbuf, "{s}/big", .{into})) == null);
-    run(c);
 }
