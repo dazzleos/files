@@ -105,6 +105,10 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             .key => |k| if (k.pressed and k.code == key_backspace) browser.request(.up),
             .scroll => |sc| window_ui.pointerScroll(sc.pos, sc.dx, sc.dy),
             .leave => window_ui.pointerLeave(),
+            .touch_down => |t| window_ui.touchDown(t.id, t.pos),
+            .touch_motion => |t| window_ui.touchMotion(t.id, t.pos),
+            .touch_up => |id| window_ui.touchUp(id),
+            .touch_cancel => window_ui.touchCancel(),
         };
         // What the clicks asked for, now that no widget is handling them.
         if (browser.apply()) dirty = true;
