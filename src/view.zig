@@ -9,6 +9,13 @@
 //! USB drives are in the tree under the user's files, each with a button
 //! to eject it (see browser.zig).
 //!
+//! Items are copied, cut and pasted from a menu (the right button, or a
+//! touch held down: on an item, or on the folder around them) or with
+//! Ctrl+C, Ctrl+X and Ctrl+V; and dragged onto a folder (among the items,
+//! or in the tree) to move them there (to copy them there, with Ctrl
+//! held, or if the folder is on another drive). While something is copied,
+//! the line at the bottom says how far it has got.
+//!
 //! Clicking a folder in the tree or among the items opens it; the arrow
 //! beside a folder in the tree opens or closes it there. Clicking anything
 //! else among the items picks it.
@@ -179,7 +186,7 @@ pub const Files = struct {
                 cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
                     header,
                     divider(cx, .horizontal),
-                    cx.make(ui.Expanded{ .child = content }),
+                    cx.make(ui.Expanded{ .child = cx.make(MenuArea{ .browser = b, .child = content }) }),
                     divider(cx, .horizontal),
                     footer,
                 } }) }),
@@ -215,9 +222,12 @@ pub const Files = struct {
     fn tile(self: *const Files, cx: *ui.Context, i: usize) ui.Widget {
         const b = self.browser;
         return cx.make(Tile{
+            .browser = b,
+            .index = i,
             .entry = b.listing.entries[i],
             .selected = b.selected == i,
             .on_press = callback(cx, .{ .browser = b, .index = i }, Act.activate),
+            .on_drop = itemDrop(cx, b, i),
         });
     }
 
@@ -234,6 +244,9 @@ pub const Files = struct {
         var size_buf: [32]u8 = undefined;
         var time_buf: [32]u8 = undefined;
         return cx.make(ListRow{
+            .browser = b,
+            .index = i,
+            .on_drop = itemDrop(cx, b, i),
             .entry = e,
             .modified = if (self.showModified()) cx.fmt("{s}", .{fs.formatTime(&time_buf, e.modified, self.now)}) else null,
             .size = if (e.kind == .file or e.kind == .program) cx.fmt("{s}", .{fs.formatSize(&size_buf, e.size)}) else "",
@@ -253,9 +266,30 @@ pub const Files = struct {
         const note_style: ui.TextStyle = .{ .size = 16, .color = t.on_surface_variant };
         const failure_style: ui.TextStyle = .{ .size = 16, .color = t.@"error" };
         const cancel = cx.make(ui.OutlinedButton{ .label = if (labels) "Cancel" else "", .icon = .close, .on_press = callback(cx, .{ .browser = b }, Act.cancel) });
+        // Copying: how far it has got, and a button to stop.
+        if (b.copier) |c| {
+            const verb = if (c.move) "Moving" else "Copying";
+            var done_buf: [32]u8 = undefined;
+            var total_buf: [32]u8 = undefined;
+            const text = if (c.phase == .scan)
+                cx.fmt("{s} \u{201c}{s}\u{201d}\u{2026}", .{ verb, c.name })
+            else
+                cx.fmt("{s} \u{201c}{s}\u{201d}: {s} of {s}", .{ verb, c.name, fs.formatSize(&done_buf, c.done_bytes), fs.formatSize(&total_buf, c.total_bytes) });
+            return cx.make(ui.Row{ .spacing = 12, .children = &.{
+                cx.make(ui.Spinner{ .size = 20 }),
+                cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = text, .style = note_style, .wrap = false, .ellipsis = true }) }),
+                cx.make(ui.OutlinedButton{ .label = if (labels) "Stop" else "", .icon = .close, .on_press = callback(cx, .{ .browser = b }, Act.stopCopy) }),
+            } });
+        }
         switch (b.prompt) {
             .none => return cx.make(ui.Row{ .spacing = 12, .children = &.{
                 cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = b.notice() orelse self.status(cx), .style = note_style, .wrap = false, .ellipsis = true }) }),
+                // What was copied or cut, while there is something.
+                if (b.clip_path != null) cx.make(ui.OutlinedButton{
+                    .label = if (labels) "Paste" else "",
+                    .icon = .content_paste,
+                    .on_press = if (b.canPaste()) callback(cx, .{ .browser = b }, Act.paste) else null,
+                }) else cx.make(ui.Empty{}),
                 cx.make(ui.OutlinedButton{
                     .label = if (labels) "New folder" else "",
                     .icon = .create_new_folder,
@@ -373,6 +407,8 @@ const Tree = struct {
             .selected = selected,
             .on_open = callback(cx, .{ .browser = b, .path = item.path }, Act.open),
             .on_toggle = callback(cx, .{ .browser = b, .path = item.path }, Act.toggle),
+            // What is dragged there goes there.
+            .on_drop = if (item.locked) null else dropCallback(cx, b, item.path),
         });
         // The open folder's row has a key, for the tree to scroll to it.
         return if (selected) w.withKey(pathKey(item.path)) else w;
@@ -397,6 +433,7 @@ fn pathKey(path: []const u8) u64 {
 /// What a click asks the browser for (made in the frame's arena).
 const Act = struct {
     browser: *Browser,
+    ui: ?*ui.Ui = null,
     path: []const u8 = "",
     index: usize = 0,
 
@@ -447,6 +484,20 @@ const Act = struct {
     fn eject(a: *const Act) void {
         a.browser.request(.{ .eject = a.path });
     }
+
+    fn paste(a: *const Act) void {
+        a.browser.request(.paste);
+    }
+
+    fn stopCopy(a: *const Act) void {
+        a.browser.request(.cancel_copy);
+    }
+
+    /// Something dragged (an item of the open folder) was dropped on the
+    /// folder at `path`: copied there with Ctrl held, else moved.
+    fn drop(a: *const Act, index: usize) void {
+        a.browser.request(.{ .drop = .{ .index = index, .into = a.path, .copy = if (a.ui) |u| u.ctrl > 0 else false } });
+    }
 };
 
 /// The new folder's name goes to the browser as it is typed.
@@ -469,6 +520,83 @@ fn systemCallback(cx: *ui.Context, b: *Browser) ?ui.ValueCallback(bool) {
         }
     }.set);
 }
+
+/// What the folder at `path` does with what is dropped on it: it goes
+/// there, if things can be put there (and nothing is being copied).
+fn dropCallback(cx: *ui.Context, b: *Browser, path: []const u8) ?ui.ValueCallback(usize) {
+    if (b.copying() or !fs.writable(path)) return null;
+    const p = cx.ui.arena().create(Act) catch return null;
+    p.* = .{ .browser = b, .ui = cx.ui, .path = path };
+    return .of(p, Act.drop);
+}
+
+/// The drop callback of the open folder's item `i`, if it is a folder.
+fn itemDrop(cx: *ui.Context, b: *Browser, i: usize) ?ui.ValueCallback(usize) {
+    const e = b.listing.entries[i];
+    if (e.kind != .folder or !e.writable) return null;
+    const path = fs.join(cx.ui.arena(), b.path, e.name) catch return null;
+    return dropCallback(cx, b, path);
+}
+
+/// The menus' actions: on the browser (which lasts as long as a menu).
+const MenuAct = struct {
+    fn open(b: *Browser) void {
+        if (b.selected) |i| b.request(.{ .activate = i });
+    }
+    fn copy(b: *Browser) void {
+        b.request(.copy);
+    }
+    fn cut(b: *Browser) void {
+        b.request(.cut);
+    }
+    fn paste(b: *Browser) void {
+        b.request(.paste);
+    }
+    fn delete(b: *Browser) void {
+        b.request(.{ .prompt = .delete });
+    }
+    fn newFolder(b: *Browser) void {
+        b.request(.{ .prompt = .new_folder });
+    }
+};
+
+/// Shows a menu where it is asked for (the right button, or a touch held
+/// down): for the open folder's item `index` (which it picks), or, with
+/// none, for the folder.
+const MenuArea = struct {
+    browser: *Browser,
+    index: ?usize = null,
+    child: ?ui.Widget = null,
+
+    pub fn event(self: *const MenuArea, n: *ui.Node, e: ui.Event) bool {
+        const pos = switch (e) {
+            .context => |p| p,
+            else => return false,
+        };
+        const b = self.browser;
+        if (b.copying()) return false;
+        const origin = n.position();
+        const at: ui.Point = .{ origin[0] + pos[0], origin[1] + pos[1] };
+        const changeable = b.changeable();
+        if (self.index) |i| {
+            if (i >= b.listing.entries.len) return false;
+            b.request(.{ .pick = i });
+            n.ui.openMenu(n, at, &.{
+                .{ .label = "Open", .on_press = .of(b, MenuAct.open) },
+                .{ .label = "Copy", .shortcut = "Ctrl+C", .on_press = .of(b, MenuAct.copy) },
+                .{ .label = "Cut", .shortcut = "Ctrl+X", .enabled = changeable, .on_press = .of(b, MenuAct.cut) },
+                .{ .label = "Delete", .shortcut = "Delete", .enabled = changeable, .on_press = .of(b, MenuAct.delete) },
+            });
+        } else {
+            if (b.file != null) return false;
+            n.ui.openMenu(n, at, &.{
+                .{ .label = "Paste", .shortcut = "Ctrl+V", .enabled = b.canPaste(), .on_press = .of(b, MenuAct.paste) },
+                .{ .label = "New folder", .enabled = changeable, .on_press = .of(b, MenuAct.newFolder) },
+            });
+        }
+        return true;
+    }
+};
 
 fn callback(cx: *ui.Context, act: Act, comptime f: fn (*const Act) void) ?ui.Callback {
     const p = cx.ui.arena().create(Act) catch return null;
@@ -503,6 +631,7 @@ pub const TreeRow = struct {
     /// A USB drive, with a button to eject it.
     drive: bool = false,
     on_eject: ?ui.Callback = null,
+    on_drop: ?ui.ValueCallback(usize) = null,
     selected: bool,
     on_open: ?ui.Callback,
     on_toggle: ?ui.Callback,
@@ -525,7 +654,7 @@ pub const TreeRow = struct {
             cx.make(FileIcon{ .kind = .folder, .icon = if (self.user_files) .person else null, .size = 24 });
         const eject: ?ui.Widget = if (self.on_eject) |on| cx.make(IconButton{ .icon = .eject, .size = 28, .on_press = on }) else null;
         const name = cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = self.label, .style = .{ .size = 17 }, .wrap = false, .ellipsis = true }) });
-        return cx.make(ui.Pressable{ .on_press = self.on_open, .interaction = &state.interaction, .child = cx.make(ui.Decorated{
+        return cx.make(ui.DropTarget{ .on_drop = self.on_drop, .radius = height / 2, .child = cx.make(ui.Pressable{ .on_press = self.on_open, .interaction = &state.interaction, .child = cx.make(ui.Decorated{
             .color = highlight,
             .radius = .all(height / 2),
             .child = cx.make(ui.SizedBox{ .height = height, .child = cx.make(ui.Padding{
@@ -537,7 +666,7 @@ pub const TreeRow = struct {
                 else
                     &.{ arrow, icon, name } }),
             }) }),
-        }) });
+        }) }) });
     }
 };
 
@@ -601,9 +730,14 @@ fn driveSpace(cx: *ui.Context, path: []const u8) []const u8 {
 
 /// An item in the grid: its icon with its name under it.
 pub const Tile = struct {
+    browser: *Browser,
+    /// Its place in the open folder (what dragging it carries).
+    index: usize,
     entry: fs.Entry,
     selected: bool,
     on_press: ?ui.Callback,
+    /// A folder takes what is dropped on it.
+    on_drop: ?ui.ValueCallback(usize) = null,
 
     pub const State = struct {
         interaction: ui.Interaction = .{},
@@ -612,14 +746,22 @@ pub const Tile = struct {
     pub fn build(self: *const Tile, cx: *ui.Context, state: *State) ui.Widget {
         const t = cx.theme();
         const highlight: ?gfx.Color = if (self.selected) t.secondary_container else if (state.interaction.hovered) t.on_surface.withAlpha(0.08) else null;
-        return cx.make(ui.Pressable{ .on_press = self.on_press, .interaction = &state.interaction, .child = cx.make(ui.Decorated{
-            .color = highlight,
-            .radius = .all(12),
-            .child = cx.make(ui.Padding{ .padding = .all(8), .child = cx.make(ui.Column{ .spacing = 6, .children = &.{
-                cx.make(ui.Expanded{ .child = cx.make(ui.Center{ .child = cx.make(FileIcon{ .kind = self.entry.kind, .link = self.entry.link, .locked = self.entry.kind == .folder and !self.entry.writable, .size = 64 }) }) }),
-                cx.make(ui.Text{ .text = self.entry.name, .style = .{ .size = 15 }, .text_align = .center, .wrap = false, .ellipsis = true }),
-            } }) }),
-        }) });
+        const icon: FileIcon = .{ .kind = self.entry.kind, .link = self.entry.link, .locked = self.entry.kind == .folder and !self.entry.writable, .size = 64 };
+        return folderItem(cx, self.browser, self.index, self.on_drop, 12, cx.make(ui.Draggable{
+            .data = self.index,
+            .label = self.entry.name,
+            .icon = icon.glyph(),
+            .on_press = self.on_press,
+            .interaction = &state.interaction,
+            .child = cx.make(ui.Decorated{
+                .color = highlight,
+                .radius = .all(12),
+                .child = cx.make(ui.Padding{ .padding = .all(8), .child = cx.make(ui.Column{ .spacing = 6, .children = &.{
+                    cx.make(ui.Expanded{ .child = cx.make(ui.Center{ .child = cx.make(icon) }) }),
+                    cx.make(ui.Text{ .text = self.entry.name, .style = .{ .size = 15 }, .text_align = .center, .wrap = false, .ellipsis = true }),
+                } }) }),
+            }),
+        }));
     }
 };
 
@@ -643,6 +785,9 @@ fn listHeader(cx: *ui.Context, modified: bool) ui.Widget {
 /// room) and its size (for files); pressing it does what pressing its tile
 /// does.
 pub const ListRow = struct {
+    browser: *Browser,
+    index: usize,
+    on_drop: ?ui.ValueCallback(usize) = null,
     entry: fs.Entry,
     modified: ?[]const u8,
     size: []const u8,
@@ -657,18 +802,26 @@ pub const ListRow = struct {
         const t = cx.theme();
         const highlight: ?gfx.Color = if (self.selected) t.secondary_container else if (state.interaction.hovered) t.on_surface.withAlpha(0.08) else null;
         const detail: ui.TextStyle = .{ .size = 15, .color = t.on_surface_variant };
-        return cx.make(ui.Pressable{ .on_press = self.on_press, .interaction = &state.interaction, .child = cx.make(ui.Decorated{
+        const icon: FileIcon = .{ .kind = self.entry.kind, .link = self.entry.link, .locked = self.entry.kind == .folder and !self.entry.writable, .size = 24 };
+        return folderItem(cx, self.browser, self.index, self.on_drop, list_row_height / 2, cx.make(ui.Draggable{ .data = self.index, .label = self.entry.name, .icon = icon.glyph(), .on_press = self.on_press, .interaction = &state.interaction, .child = cx.make(ui.Decorated{
             .color = highlight,
             .radius = .all(list_row_height / 2),
             .child = cx.make(ui.Padding{ .padding = .symmetric(12, 0), .child = cx.make(ui.Row{ .spacing = 12, .cross_axis_alignment = .center, .children = &.{
-                cx.make(FileIcon{ .kind = self.entry.kind, .link = self.entry.link, .locked = self.entry.kind == .folder and !self.entry.writable, .size = 24 }),
+                cx.make(icon),
                 cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = self.entry.name, .style = .{ .size = 16 }, .wrap = false, .ellipsis = true }) }),
                 if (self.modified) |m| cx.make(ui.SizedBox{ .width = modified_width, .child = cx.make(ui.Text{ .text = m, .style = detail, .wrap = false, .ellipsis = true }) }) else cx.make(ui.Empty{}),
                 cx.make(ui.SizedBox{ .width = size_width, .child = cx.make(ui.Text{ .text = self.size, .style = detail, .wrap = false, .text_align = .end }) }),
             } }) }),
-        }) });
+        }) }));
     }
 };
+
+/// An item of the open folder (`body`, which can be dragged), with its
+/// menu, taking what is dropped on it if it is a folder.
+fn folderItem(cx: *ui.Context, b: *Browser, index: usize, on_drop: ?ui.ValueCallback(usize), radius: f32, body: ui.Widget) ui.Widget {
+    const target = if (on_drop != null) cx.make(ui.DropTarget{ .on_drop = on_drop, .radius = radius, .child = body }) else body;
+    return cx.make(MenuArea{ .browser = b, .index = index, .child = target });
+}
 
 /// What an item is, as a Material icon (folders in the primary colour);
 /// links get a badge in the corner, and folders that cannot be changed
@@ -1152,4 +1305,106 @@ fn findTextPrefix(n: *ui.Node, prefix: []const u8) ?*ui.Node {
     if (n.widget.as(ui.Text)) |t| if (std.mem.startsWith(u8, t.text, prefix)) return n;
     for (n.children.items) |ch| if (findTextPrefix(ch, prefix)) |f| return f;
     return null;
+}
+
+/// Drags from the middle of `from` to the middle of `to`.
+fn dragTo(u: *ui.Ui, from: *ui.Node, to: ui.Point) void {
+    const at = from.position();
+    const start: ui.Point = .{ at[0] + from.size.w / 2, at[1] + from.size.h / 2 };
+    u.pointerMotion(start);
+    u.pointerButton(start, ui.btn_left, true);
+    u.pointerMotion(.{ start[0] + 20, start[1] });
+    u.pointerMotion(to);
+    u.pointerButton(to, ui.btn_left, false);
+}
+
+fn middle(n: *ui.Node) ui.Point {
+    const at = n.position();
+    return .{ at[0] + n.size.w / 2, at[1] + n.size.h / 2 };
+}
+
+test "copying and pasting from the menu, and dragging onto folders" {
+    var t: fs.TestTree = .{};
+    try t.init();
+    defer t.deinit();
+    var b = try Browser.init(testing.allocator, t.path);
+    defer b.deinit();
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    var n: u64 = 0;
+    const Frame = struct {
+        fn draw(uu: *ui.Ui, bb: *Browser, nn: *u64, size: [2]u32) void {
+            _ = bb.apply();
+            while (bb.work(std.time.ns_per_ms)) {}
+            nn.* += 1;
+            uu.frame(size[0], size[1], nn.*, Files{ .browser = bb, .width = @floatFromInt(size[0]) });
+        }
+    }.draw;
+    Frame(u, &b, &n, .{ 1600, 900 });
+    // No Paste button until something is copied.
+    try testing.expect(findText(u.root.?, "Paste") == null);
+
+    // The right button on b-file: it is picked, and its menu shows.
+    const p = middle(tile(u, "b-file").?);
+    u.pointerMotion(p);
+    u.pointerButton(p, ui.btn_right, true);
+    u.pointerButton(p, ui.btn_right, false);
+    Frame(u, &b, &n, .{ 1600, 900 });
+    try testing.expectEqualStrings("b-file", b.picked().?.name);
+    try testing.expect(b.file == null);
+    try testing.expect(u.menu != null);
+    click(u, findText(u.menu_root.?, "Copy").?);
+    Frame(u, &b, &n, .{ 1600, 900 });
+    try testing.expectEqualStrings("b-file", b.clipName().?);
+    for (test_sizes) |size| {
+        Frame(u, &b, &n, size);
+        try testing.expect(!overflows(u.root.?));
+    }
+    Frame(u, &b, &n, .{ 1600, 900 });
+    // Pasted from the button at the bottom.
+    click(u, up(findText(u.root.?, "Paste").?, ui.OutlinedButton).?);
+    Frame(u, &b, &n, .{ 1600, 900 });
+    try testing.expect(tile(u, "b-file (copy)") != null);
+
+    // Dragged onto A-folder (a tile): moved there.
+    dragTo(u, tile(u, "b-file (copy)").?, middle(tile(u, "A-folder").?));
+    Frame(u, &b, &n, .{ 1600, 900 });
+    try testing.expect(tile(u, "b-file (copy)") == null);
+    var buf: [128]u8 = undefined;
+    const folder = try std.fmt.bufPrint(&buf, "{s}/A-folder", .{t.path});
+    var l = fs.Listing.read(testing.allocator, folder);
+    try testing.expectEqualStrings("b-file (copy)", l.entries[0].name);
+    l.deinit();
+
+    // With Ctrl, onto A-folder in the tree: copied.
+    u.keyEvent(ui.keymap.left_ctrl, true);
+    dragTo(u, tile(u, "c-tool").?, middle(up(findText(up(findText(u.root.?, "User files").?, ui.ScrollView).?, "A-folder").?, TreeRow).?));
+    u.keyEvent(ui.keymap.left_ctrl, false);
+    Frame(u, &b, &n, .{ 1600, 900 });
+    try testing.expect(tile(u, "c-tool") != null);
+    l = fs.Listing.read(testing.allocator, folder);
+    try testing.expectEqual(@as(usize, 2), l.entries.len);
+    l.deinit();
+
+    // While copying, the bottom says how far it has got, at every size.
+    try t.write("big", "z" ** (1024 * 1024), 0o644);
+    b.request(.{ .open = t.path });
+    _ = b.apply();
+    const big = for (b.listing.entries, 0..) |e, i| {
+        if (std.mem.eql(u8, e.name, "big")) break i;
+    } else unreachable;
+    b.request(.{ .drop = .{ .index = big, .into = folder, .copy = true } });
+    _ = b.apply();
+    _ = b.work(0);
+    _ = b.work(0);
+    for (test_sizes) |size| {
+        n += 1;
+        u.frame(size[0], size[1], n, Files{ .browser = &b, .width = @floatFromInt(size[0]) });
+        try testing.expect(!overflows(u.root.?));
+    }
+    try testing.expect(findTextPrefix(u.root.?, "Copying \u{201c}big\u{201d}: ") != null);
+    b.request(.cancel_copy);
+    Frame(u, &b, &n, .{ 1600, 900 });
+    try testing.expect(!b.copying());
 }

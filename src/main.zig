@@ -26,12 +26,21 @@ const print = sys.print;
 const background = 0xff141218;
 
 /// Keys: Backspace goes up a folder, Delete asks whether to delete the
-/// item picked, and Escape stops asking (unless a text field has them).
+/// item picked, Ctrl+C, Ctrl+X and Ctrl+V copy, cut and paste, and
+/// Escape stops asking (unless a text field has them).
 const key_backspace = 14;
+const key_c = 46;
+const key_x = 45;
+const key_v = 47;
 const key_delete = 111;
 const key_escape = 1;
 
 var frame: vc4.render.Frame = undefined;
+
+/// How long copying works each time round the loop, and how often the
+/// progress is drawn.
+const copy_slice_ns = 30 * std.time.ns_per_ms;
+const progress_ns = 250 * std.time.ns_per_ms;
 
 pub fn main(init: std.process.Init.Minimal) u8 {
     sys.logToKmsgIfStderr();
@@ -81,6 +90,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
 
     var dirty = true;
     var idle = false;
+    var last_progress: u64 = 0;
     var suspended = false;
     while (true) {
         const waited = if (idle) blk: {
@@ -116,6 +126,9 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
                     key_backspace => if (!typing) browser.request(.up),
                     key_delete => if (!typing and browser.prompt == .none) browser.request(.{ .prompt = .delete }),
                     key_escape => if (browser.prompt != .none) browser.request(.{ .prompt = .none }),
+                    key_c => if (!typing and window_ui.ctrl > 0) browser.request(.copy),
+                    key_x => if (!typing and window_ui.ctrl > 0) browser.request(.cut),
+                    key_v => if (!typing and window_ui.ctrl > 0) browser.request(.paste),
                     else => {},
                 };
                 dirty = true;
@@ -135,6 +148,17 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         if (browser.apply()) dirty = true;
 
         idle = true;
+        // Copying, a little each time round: the window is drawn again
+        // (to say how far it has got) a few times a second.
+        if (browser.copying()) {
+            const was = browser.copying();
+            _ = browser.work(copy_slice_ns);
+            idle = false;
+            if (now >= last_progress + progress_ns or was != browser.copying()) {
+                last_progress = now;
+                dirty = true;
+            }
+        }
         if (!suspended and (dirty or window_ui.needs_frame)) {
             dirty = false;
             window_ui.frame(width, height, now, view.Files{
@@ -185,6 +209,7 @@ test {
     _ = @import("content.zig");
     _ = @import("viewer.zig");
     _ = fs;
+    _ = @import("copier.zig");
     _ = browser_mod;
     _ = view;
 }

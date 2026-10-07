@@ -13,6 +13,7 @@
 const std = @import("std");
 const sys = @import("sys");
 const fs = @import("fs.zig");
+const copier = @import("copier.zig");
 const content = @import("content.zig");
 
 pub const Action = union(enum) {
@@ -42,7 +43,23 @@ pub const Action = union(enum) {
     delete,
     /// Eject the USB drive of this name (in /media), for it to be taken out.
     eject: []const u8,
+    /// Pick an item in the open folder (an index into its entries),
+    /// without opening it.
+    pick: usize,
+    /// Copy the item picked, or cut it (to be moved where it is pasted).
+    copy,
+    cut,
+    /// Copy (or move, if it was cut) what was copied into the open folder.
+    paste,
+    /// An item of the open folder (an index) was dragged onto the folder
+    /// `into`: moved there, or copied if `copy` (or if it is on another
+    /// drive).
+    drop: Drop,
+    /// Stop copying.
+    cancel_copy,
 };
+
+pub const Drop = struct { index: usize, into: []const u8, copy: bool = false };
 
 /// What the window is asking: nothing, a new folder's name, or whether to
 /// delete the item picked.
@@ -84,8 +101,13 @@ pub const Browser = struct {
     drives: fs.Listing,
     /// Asks the media manager to eject a drive.
     ejector: *const fn (name: []const u8) ?sys.media.Answer = askEject,
-    /// What happened (to a drive ejected), said at the bottom until
-    /// something else is done.
+    /// What was copied or cut (its path), to be pasted.
+    clip_path: ?[]u8 = null,
+    clip_cut: bool = false,
+    /// What is being copied or moved, a little each frame (`work`).
+    copier: ?*copier.Copier = null,
+    /// What happened (to a drive ejected, or to what was copied), said at
+    /// the bottom until something else is done.
     notice_buf: [200]u8 = undefined,
     notice_len: usize = 0,
     /// What was asked for since the last `apply`, and room for its path.
@@ -194,6 +216,11 @@ pub const Browser = struct {
         b.closeFile();
         b.listing.deinit();
         b.drives.deinit();
+        if (b.copier) |c| {
+            c.cancel();
+            c.deinit();
+        }
+        if (b.clip_path) |p| b.gpa.free(p);
         b.gpa.free(b.path);
         b.pending_path.deinit(b.gpa);
     }
@@ -207,6 +234,11 @@ pub const Browser = struct {
                 b.pending_path.clearRetainingCapacity();
                 b.pending_path.appendSlice(b.gpa, path) catch return;
                 a = @unionInit(Action, @tagName(tag), b.pending_path.items);
+            },
+            .drop => |d| {
+                b.pending_path.clearRetainingCapacity();
+                b.pending_path.appendSlice(b.gpa, d.into) catch return;
+                a = .{ .drop = .{ .index = d.index, .into = b.pending_path.items, .copy = d.copy } };
             },
             else => {},
         }
@@ -230,8 +262,127 @@ pub const Browser = struct {
             .make_folder => b.makeFolder(),
             .delete => b.delete(),
             .eject => |name| b.eject(name),
+            .pick => |i| if (i < b.listing.entries.len) {
+                if (b.selected != i) b.ask(.none);
+                b.closeFile();
+                b.selected = i;
+            },
+            .copy, .cut => b.clip(a == .cut),
+            .paste => b.paste(),
+            .drop => |d| b.drop(d),
+            .cancel_copy => if (b.copier) |c| c.cancel(),
         }
         return true;
+    }
+
+    /// Whether something is being copied or moved.
+    pub fn copying(b: *const Browser) bool {
+        return b.copier != null;
+    }
+
+    /// Whether there is something to paste, and it can go here.
+    pub fn canPaste(b: *const Browser) bool {
+        return b.clip_path != null and b.copier == null and b.file == null and b.changeable();
+    }
+
+    /// The name of what was copied or cut, if anything was.
+    pub fn clipName(b: *const Browser) ?[]const u8 {
+        return if (b.clip_path) |p| fs.baseName(p) else null;
+    }
+
+    fn clip(b: *Browser, cut: bool) void {
+        const e = b.picked() orelse return;
+        // Cutting needs leave to delete it here.
+        if (cut and !b.changeable()) return;
+        const path = fs.join(b.gpa, b.path, e.name) catch return;
+        if (b.clip_path) |p| b.gpa.free(p);
+        b.clip_path = path;
+        b.clip_cut = cut;
+        b.say("{s} \u{201c}{s}\u{201d}: paste it where it is to go", .{ if (cut) "Cut" else "Copied", e.name });
+    }
+
+    fn paste(b: *Browser) void {
+        if (!b.canPaste()) return;
+        const from = b.clip_path.?;
+        // Cut and pasted where it was: nothing to do.
+        if (b.clip_cut and std.mem.eql(u8, fs.parent(from), b.path)) return;
+        b.startCopy(from, b.path, b.clip_cut);
+    }
+
+    fn drop(b: *Browser, d: Drop) void {
+        if (b.copier != null or d.index >= b.listing.entries.len) return;
+        const e = b.listing.entries[d.index];
+        const from = fs.join(b.gpa, b.path, e.name) catch return;
+        defer b.gpa.free(from);
+        // Onto itself, or where it already is.
+        if (std.mem.eql(u8, from, d.into) or std.mem.eql(u8, b.path, d.into)) return;
+        if (!fs.writable(d.into)) {
+            b.say("\u{201c}{s}\u{201d} cannot go there: {s}", .{ e.name, copier.describeError(error.AccessDenied) });
+            return;
+        }
+        // To another drive it is copied; within one, moved.
+        const move = !d.copy and b.changeable() and copier.sameFilesystem(from, d.into);
+        b.startCopy(from, d.into, move);
+    }
+
+    fn startCopy(b: *Browser, from: []const u8, into: []const u8, move: bool) void {
+        b.ask(.none);
+        const c = copier.Copier.start(b.gpa, from, into, move) catch |err| {
+            b.say("\u{201c}{s}\u{201d} cannot be {s}: {s}", .{ fs.baseName(from), if (move) "moved" else "copied", copier.describeError(err) });
+            return;
+        };
+        b.copier = c;
+        // What was cut is gone once moved.
+        if (move and b.clip_path != null and std.mem.eql(u8, b.clip_path.?, from)) {
+            b.gpa.free(b.clip_path.?);
+            b.clip_path = null;
+        }
+        if (c.done()) b.finishCopy();
+    }
+
+    /// Copies for about `budget_ns`, if something is being copied.
+    /// Returns whether something is.
+    pub fn work(b: *Browser, budget_ns: u64) bool {
+        const c = b.copier orelse return false;
+        if (c.step(budget_ns)) b.finishCopy();
+        return true;
+    }
+
+    fn finishCopy(b: *Browser) void {
+        const c = b.copier orelse return;
+        b.copier = null;
+        defer c.deinit();
+        const verb = if (c.move) "moved" else "copied";
+        if (c.err) |err| {
+            b.say("\u{201c}{s}\u{201d} could not be {s}: {s}", .{ fs.baseName(c.source), verb, copier.describeError(err) });
+        } else if (c.skipped > 0) {
+            b.say("\u{201c}{s}\u{201d} was {s}, but {d} of the things in it could not be", .{ fs.baseName(c.source), verb, c.skipped });
+        } else if (c.cancelled) {
+            b.say("Stopped: \u{201c}{s}\u{201d} was only partly {s}", .{ fs.baseName(c.source), verb });
+        } else b.say("\u{201c}{s}\u{201d} was {s} to {s}", .{ c.name, verb, c.into });
+        // The folders it went from and to are read again; in the open
+        // one, what was made is picked.
+        b.refreshFolder(c.into);
+        if (c.move) {
+            b.refreshFolder(fs.parent(c.source));
+            b.collapseWithin(c.source);
+        }
+        const notice_len = b.notice_len;
+        if (std.mem.eql(u8, b.path, c.into) or (c.move and std.mem.eql(u8, b.path, fs.parent(c.source)))) {
+            b.reload();
+            if (std.mem.eql(u8, b.path, c.into)) b.selected = for (b.listing.entries, 0..) |e, i| {
+                if (std.mem.eql(u8, e.name, c.name)) break i;
+            } else null;
+        }
+        b.notice_len = notice_len;
+    }
+
+    /// Reads a folder open in the tree again.
+    fn refreshFolder(b: *Browser, path: []const u8) void {
+        if (b.expanded.getPtr(path)) |l| {
+            l.deinit();
+            l.* = fs.Listing.read(b.gpa, path);
+        }
     }
 
     /// The new folder's name, as it is typed (kept until it is made or
@@ -721,4 +872,103 @@ test "USB drives: opened like the user's files, ejected, and gone" {
     b.request(.{ .open = drive });
     _ = b.apply();
     try testing.expectEqualStrings(t.path, b.path);
+}
+
+fn finish(b: *Browser) void {
+    while (b.work(std.time.ns_per_ms)) {}
+}
+
+test "copying and pasting, cutting and pasting, and dropping onto a folder" {
+    var t: fs.TestTree = .{};
+    try t.init();
+    defer t.deinit();
+    var b = try Browser.init(testing.allocator, t.path);
+    defer b.deinit();
+    // Nothing to paste yet.
+    try testing.expect(!b.canPaste());
+
+    // b-file copied and pasted in the same folder: "b-file (copy)", picked.
+    b.request(.{ .pick = 2 });
+    _ = b.apply();
+    try testing.expectEqualStrings("b-file", b.picked().?.name);
+    try testing.expect(b.file == null);
+    b.request(.copy);
+    _ = b.apply();
+    try testing.expectEqualStrings("b-file", b.clipName().?);
+    try testing.expect(b.canPaste());
+    b.request(.paste);
+    _ = b.apply();
+    try testing.expect(b.copying());
+    finish(&b);
+    try testing.expectEqualStrings("b-file (copy)", b.picked().?.name);
+    try testing.expectEqualStrings("b-file", b.clipName().?);
+
+    // Cut, and pasted into A-folder: moved (and nothing left to paste).
+    b.request(.cut);
+    _ = b.apply();
+    var buf: [128]u8 = undefined;
+    const folder = try std.fmt.bufPrint(&buf, "{s}/A-folder", .{t.path});
+    b.request(.{ .open = folder });
+    _ = b.apply();
+    b.request(.paste);
+    _ = b.apply();
+    finish(&b);
+    try testing.expect(b.clip_path == null);
+    try testing.expectEqualStrings("b-file (copy)", b.picked().?.name);
+    b.request(.{ .open = t.path });
+    _ = b.apply();
+    for (b.listing.entries) |e| try testing.expect(!std.mem.eql(u8, e.name, "b-file (copy)"));
+
+    // c-tool dropped onto A-folder: moved; with copy, copied.
+    const tool = for (b.listing.entries, 0..) |e, i| {
+        if (std.mem.eql(u8, e.name, "c-tool")) break i;
+    } else unreachable;
+    b.request(.{ .drop = .{ .index = tool, .into = folder, .copy = true } });
+    _ = b.apply();
+    finish(&b);
+    try testing.expectEqualStrings("\u{201c}c-tool\u{201d} was copied to " ++ "", b.notice().?[0 .. "\u{201c}c-tool\u{201d} was copied to ".len]);
+    b.request(.{ .drop = .{ .index = tool, .into = folder } });
+    _ = b.apply();
+    finish(&b);
+    for (b.listing.entries) |e| try testing.expect(!std.mem.eql(u8, e.name, "c-tool"));
+    // Into A-folder went "c-tool" and then "c-tool (copy)", beside "b-file (copy)".
+    var l = fs.Listing.read(testing.allocator, folder);
+    defer l.deinit();
+    try testing.expectEqual(@as(usize, 3), l.entries.len);
+
+    // A folder onto itself does nothing; into a folder in it, it says why.
+    b.request(.{ .drop = .{ .index = 0, .into = folder } });
+    _ = b.apply();
+    try testing.expect(!b.copying());
+    var inner_buf: [160]u8 = undefined;
+    try fs.makeFolder(folder, "inner");
+    b.request(.{ .drop = .{ .index = 0, .into = try std.fmt.bufPrint(&inner_buf, "{s}/inner", .{folder}) } });
+    _ = b.apply();
+    try testing.expect(!b.copying());
+    try testing.expectEqualStrings("\u{201c}A-folder\u{201d} cannot be moved: a folder cannot go into itself", b.notice().?);
+}
+
+test "cancelling a copy" {
+    var t: fs.TestTree = .{};
+    try t.init();
+    defer t.deinit();
+    try t.write("big", "z" ** (1024 * 1024), 0o644);
+    var b = try Browser.init(testing.allocator, t.path);
+    defer b.deinit();
+    const big = for (b.listing.entries, 0..) |e, i| {
+        if (std.mem.eql(u8, e.name, "big")) break i;
+    } else unreachable;
+    var buf: [128]u8 = undefined;
+    b.request(.{ .drop = .{ .index = big, .into = try std.fmt.bufPrint(&buf, "{s}/A-folder", .{t.path}), .copy = true } });
+    _ = b.apply();
+    _ = b.work(0);
+    _ = b.work(0);
+    try testing.expect(b.copying());
+    b.request(.cancel_copy);
+    _ = b.apply();
+    finish(&b);
+    try testing.expectEqualStrings("Stopped: \u{201c}big\u{201d} was only partly copied", b.notice().?);
+    var l = fs.Listing.read(testing.allocator, buf[0 .. t.path.len + "/A-folder".len]);
+    defer l.deinit();
+    try testing.expectEqual(@as(usize, 0), l.entries.len);
 }
