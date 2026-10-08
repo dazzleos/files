@@ -288,7 +288,7 @@ pub fn makeFile(dir: []const u8, name: []const u8) ChangeError!void {
 const text_extensions = [_][]const u8{
     "txt", "text", "md",  "log", "csv",  "tsv", "json", "xml",  "conf", "cfg", "ini",
     "toml", "yaml", "yml", "sh",  "zig", "c",   "h",    "cpp",  "py",   "js",  "css",
-    "html", "htm", "rs",  "go",  "lua",  "srt",
+    "html", "htm", "rs",  "go",  "lua",  "srt",  "zon", "pyw",
 };
 
 /// Whether a file named `name` is plain text, by the ending of its name.
