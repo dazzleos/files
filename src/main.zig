@@ -178,6 +178,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         }
         if (!suspended and (dirty or window_ui.needs_frame)) {
             dirty = false;
+            window_ui.fullscreen = win.fullscreen;
             window_ui.frame(width, height, now, view.Files{
                 .browser = &browser,
                 .on_close = .of(&controls, app.Controls.close),
