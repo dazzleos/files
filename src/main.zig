@@ -78,6 +78,18 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     window_ui.clipboard = .of(&win.clipboard);
     try window_ui.attachGpu(dev);
 
+    // Apps it starts (the text editor) find the compositor as it did.
+    var env_bufs: [2][160]u8 = undefined;
+    var env: [3][*:0]const u8 = undefined;
+    env[0] = "HOME=/";
+    var env_len: usize = 1;
+    for ([_][]const u8{ "XDG_RUNTIME_DIR", "WAYLAND_DISPLAY" }, &env_bufs) |name, *buf| {
+        const value = std.process.Environ.getPosix(init.environ, name) orelse continue;
+        env[env_len] = (std.fmt.bufPrintZ(buf, "{s}={s}", .{ name, value }) catch continue).ptr;
+        env_len += 1;
+    }
+    browser_mod.app_env = env[0..env_len];
+
     // The user's files, on the SD card.
     var browser = try browser_mod.Browser.init(gpa, sys.system.user_dir);
     defer browser.deinit();
@@ -114,7 +126,11 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         // front gets the GPU memory.
         if (win.suspended != suspended) {
             suspended = win.suspended;
-            if (suspended) win.releaseSpareBuffers() else dirty = true;
+            if (suspended) win.releaseSpareBuffers() else {
+                // An editor may have been installed or removed meanwhile.
+                browser.findEditor();
+                dirty = true;
+            }
         }
         const now = sys.nowNs();
         // The keyboard's layout, as the shell says.

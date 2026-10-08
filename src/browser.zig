@@ -39,6 +39,11 @@ pub const Action = union(enum) {
     prompt: Prompt,
     /// Make the folder named `name` in the open folder, and pick it.
     make_folder,
+    /// Make the text file named `name` in the open folder, pick it, and
+    /// open it in the text editor.
+    make_text_file,
+    /// Open the item picked (a text file) in the text editor.
+    edit,
     /// Delete the item picked: a file, or a folder and everything in it.
     delete,
     /// Eject the USB drive of this name (in /media), for it to be taken out.
@@ -61,9 +66,22 @@ pub const Action = union(enum) {
 
 pub const Drop = struct { index: usize, into: []const u8, copy: bool = false };
 
-/// What the window is asking: nothing, a new folder's name, or whether to
-/// delete the item picked.
-pub const Prompt = enum { none, new_folder, delete };
+/// What the window is asking: nothing, a new folder's or text file's
+/// name, or whether to delete the item picked.
+pub const Prompt = enum { none, new_folder, new_text_file, delete };
+
+/// Starts the app `program` with the file at `path`. Returns whether it
+/// could be.
+pub const Launcher = *const fn (program: [:0]const u8, path: [:0]const u8) bool;
+
+/// The environment apps started from Files get ("NAME=value"): where the
+/// compositor is (set by main).
+pub var app_env: []const [*:0]const u8 = &.{};
+
+fn launchApp(program: [:0]const u8, path: [:0]const u8) bool {
+    sys.apps.launch(program, path, app_env) catch return false;
+    return true;
+}
 
 /// How the open folder's items are shown: as a grid of icons, or as a list
 /// with when each was changed and its size.
@@ -110,6 +128,13 @@ pub const Browser = struct {
     /// the bottom until something else is done.
     notice_buf: [200]u8 = undefined,
     notice_len: usize = 0,
+    /// The text editor (its program), if an app that edits text is
+    /// installed: `editor_len` bytes of `editor_buf`.
+    editor_buf: [256]u8 = undefined,
+    editor_len: usize = 0,
+    /// Where apps are looked for, and how they are started.
+    apps_dir: []const u8 = sys.system.apps_dir,
+    launcher: Launcher = launchApp,
     /// What was asked for since the last `apply`, and room for its path.
     pending: ?Action = null,
     pending_path: std.ArrayList(u8) = .empty,
@@ -125,6 +150,7 @@ pub const Browser = struct {
             .drives = fs.Listing.read(gpa, sys.media.media_dir),
         };
         try b.expand(user_files);
+        b.findEditor();
         return b;
     }
 
@@ -260,6 +286,8 @@ pub const Browser = struct {
             .layout => |l| b.layout = l,
             .prompt => |p| b.ask(p),
             .make_folder => b.makeFolder(),
+            .make_text_file => b.makeTextFile(),
+            .edit => b.edit(),
             .delete => b.delete(),
             .eject => |name| b.eject(name),
             .pick => |i| if (i < b.listing.entries.len) {
@@ -413,8 +441,9 @@ pub const Browser = struct {
         b.delete_count = null;
         switch (p) {
             .none => {},
-            .new_folder => {
+            .new_folder, .new_text_file => {
                 if (b.file != null or !b.changeable()) return;
+                if (p == .new_text_file and b.editor() == null) return;
                 b.name_len = 0;
             },
             .delete => {
@@ -443,6 +472,67 @@ pub const Browser = struct {
         b.selected = for (b.listing.entries, 0..) |e, i| {
             if (std.mem.eql(u8, e.name, b.newName())) break i;
         } else null;
+    }
+
+    /// Looks again for an app that edits text (one may have been installed
+    /// or removed).
+    pub fn findEditor(b: *Browser) void {
+        const program = sys.apps.handlerIn(b.apps_dir, &b.editor_buf, sys.apps.text_plain);
+        b.editor_len = if (program) |p| p.len else 0;
+    }
+
+    /// The text editor's program, if there is one.
+    pub fn editor(b: *const Browser) ?[:0]const u8 {
+        return if (b.editor_len > 0) b.editor_buf[0..b.editor_len :0] else null;
+    }
+
+    /// Whether the item picked is a text file the editor can open.
+    pub fn canEdit(b: *const Browser) bool {
+        if (b.editor() == null or b.copier != null) return false;
+        const e = b.picked() orelse return false;
+        if (e.kind != .file) return false;
+        if (fs.isTextName(e.name)) return true;
+        // Shown, and it is text (or nothing yet).
+        const f = b.file orelse return false;
+        return f.kind == .text or f.kind == .empty;
+    }
+
+    fn edit(b: *Browser) void {
+        if (!b.canEdit()) return;
+        const e = b.picked().?;
+        b.openInEditor(e.name);
+    }
+
+    fn openInEditor(b: *Browser, name: []const u8) void {
+        var buf: [4096]u8 = undefined;
+        const path = std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ b.path, name }) catch return;
+        if (!b.launcher(b.editor().?, path)) b.say("The text editor could not be started", .{});
+    }
+
+    /// The new text file's name: as typed, with ".txt" after it if it does
+    /// not say what it is.
+    pub fn textFileName(b: *const Browser, buf: []u8) []const u8 {
+        const name = b.newName();
+        if (name.len == 0 or std.mem.lastIndexOfScalar(u8, name, '.') != null) return name;
+        return std.fmt.bufPrint(buf, "{s}.txt", .{name}) catch name;
+    }
+
+    fn makeTextFile(b: *Browser) void {
+        if (b.prompt != .new_text_file or b.editor() == null) return;
+        var name_buf: [260]u8 = undefined;
+        const name = b.textFileName(&name_buf);
+        fs.makeFile(b.path, name) catch |err| {
+            b.failure = fs.describeError(err);
+            return;
+        };
+        b.prompt = .none;
+        b.failure = null;
+        b.reload();
+        // The new file is picked, and opened to be written in.
+        b.selected = for (b.listing.entries, 0..) |e, i| {
+            if (std.mem.eql(u8, e.name, name)) break i;
+        } else null;
+        b.openInEditor(name);
     }
 
     fn delete(b: *Browser) void {
@@ -725,6 +815,86 @@ test "the newest first, and the item picked stays picked; and the list" {
     b.request(.{ .layout = .list });
     _ = b.apply();
     try testing.expectEqual(Layout.list, b.layout);
+}
+
+var test_launched: [256]u8 = undefined;
+var test_launched_len: usize = 0;
+
+fn testLauncher(program: [:0]const u8, path: [:0]const u8) bool {
+    _ = program;
+    @memcpy(test_launched[0..path.len], path);
+    test_launched_len = path.len;
+    return true;
+}
+
+test "text files: made, and opened in the editor, only if there is one" {
+    var t: fs.TestTree = .{};
+    try t.init();
+    defer t.deinit();
+    var b = try Browser.init(testing.allocator, t.path);
+    defer b.deinit();
+    b.launcher = testLauncher;
+    test_launched_len = 0;
+    // No editor: nothing is offered.
+    b.apps_dir = "/nonexistent";
+    b.findEditor();
+    try testing.expect(b.editor() == null);
+    b.request(.{ .prompt = .new_text_file });
+    _ = b.apply();
+    try testing.expectEqual(Prompt.none, b.prompt);
+
+    // An editor installed (an app that says it opens text).
+    var buf: [256]u8 = undefined;
+    const apps = try std.fmt.bufPrintZ(&buf, "{s}/apps", .{t.path});
+    try fs.makeFolder(t.path, "apps");
+    try fs.makeFolder(apps, "ed");
+    var hbuf: [256]u8 = undefined;
+    try sys.files.writeNew(try std.fmt.bufPrintZ(&hbuf, "{s}/ed/ed.handles", .{apps}), "text/plain\n");
+    b.apps_dir = apps;
+    b.findEditor();
+    try testing.expect(std.mem.endsWith(u8, b.editor().?, "/ed/ed"));
+    b.reload();
+
+    // A new text file: ".txt" after a name without an ending, and it opens.
+    b.request(.{ .prompt = .new_text_file });
+    _ = b.apply();
+    try testing.expectEqual(Prompt.new_text_file, b.prompt);
+    b.setName("notes");
+    b.request(.make_text_file);
+    _ = b.apply();
+    try testing.expectEqual(Prompt.none, b.prompt);
+    try testing.expectEqualStrings("notes.txt", b.picked().?.name);
+    var pbuf: [256]u8 = undefined;
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&pbuf, "{s}/notes.txt", .{t.path}), test_launched[0..test_launched_len]);
+    try testing.expect(b.canEdit());
+    // Not twice.
+    b.request(.{ .prompt = .new_text_file });
+    _ = b.apply();
+    b.setName("notes.txt");
+    b.request(.make_text_file);
+    _ = b.apply();
+    try testing.expectEqualStrings("there is already something with that name", b.failure.?);
+    b.request(.{ .prompt = .none });
+    _ = b.apply();
+
+    // A folder cannot be edited; a text file picked can.
+    for (b.listing.entries, 0..) |e, i| if (e.kind == .folder) {
+        b.request(.{ .pick = i });
+        _ = b.apply();
+        break;
+    };
+    try testing.expect(!b.canEdit());
+    test_launched_len = 0;
+    b.request(.edit);
+    _ = b.apply();
+    try testing.expectEqual(@as(usize, 0), test_launched_len);
+    for (b.listing.entries, 0..) |e, i| if (std.mem.eql(u8, e.name, "notes.txt")) {
+        b.request(.{ .pick = i });
+        _ = b.apply();
+    };
+    b.request(.edit);
+    _ = b.apply();
+    try testing.expect(std.mem.endsWith(u8, test_launched[0..test_launched_len], "/notes.txt"));
 }
 
 test "making a folder, which is picked; and deleting files, and folders with what is in them" {

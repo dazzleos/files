@@ -268,6 +268,38 @@ pub fn makeFolder(dir: []const u8, name: []const u8) ChangeError!void {
     };
 }
 
+/// Makes the empty file `name` in the folder at `dir`.
+pub fn makeFile(dir: []const u8, name: []const u8) ChangeError!void {
+    if (!validName(name)) return error.BadName;
+    var buf: [4096]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ dir, name }) catch return error.BadName;
+    const rc = linux.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true }, 0o644);
+    return switch (linux.errno(rc)) {
+        .SUCCESS => sys.close(@intCast(rc)),
+        .EXIST => error.Exists,
+        .ACCES, .PERM, .ROFS => error.AccessDenied,
+        .NOENT => error.NotFound,
+        .NAMETOOLONG => error.BadName,
+        else => error.Unexpected,
+    };
+}
+
+/// The endings of the names of files that are plain text.
+const text_extensions = [_][]const u8{
+    "txt", "text", "md",  "log", "csv",  "tsv", "json", "xml",  "conf", "cfg", "ini",
+    "toml", "yaml", "yml", "sh",  "zig", "c",   "h",    "cpp",  "py",   "js",  "css",
+    "html", "htm", "rs",  "go",  "lua",  "srt",
+};
+
+/// Whether a file named `name` is plain text, by the ending of its name.
+pub fn isTextName(name: []const u8) bool {
+    const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return false;
+    if (dot == 0) return false;
+    const ext = name[dot + 1 ..];
+    for (text_extensions) |e| if (std.ascii.eqlIgnoreCase(ext, e)) return true;
+    return false;
+}
+
 /// Deletes `name` from the folder at `dir`: a file, or a folder and
 /// everything in it. A link is deleted itself, not what it leads to.
 pub fn delete(dir: []const u8, name: []const u8) ChangeError!void {
@@ -381,6 +413,15 @@ test "paths" {
     try testing.expectEqualStrings("999 bytes", formatSize(&buf, 999));
     try testing.expectEqualStrings("12.3 kB", formatSize(&buf, 12345));
     try testing.expectEqualStrings("4.0 MB", formatSize(&buf, 4_000_000));
+}
+
+test "text files, by name" {
+    try testing.expect(isTextName("notes.txt"));
+    try testing.expect(isTextName("README.MD"));
+    try testing.expect(isTextName("a.b.json"));
+    try testing.expect(!isTextName("photo.png"));
+    try testing.expect(!isTextName("txt"));
+    try testing.expect(!isTextName(".txt"));
 }
 
 /// A folder of test files, removed by `deinit`.

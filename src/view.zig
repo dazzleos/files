@@ -292,6 +292,17 @@ pub const Files = struct {
                     .icon = .content_paste,
                     .on_press = if (b.canPaste()) callback(cx, .{ .browser = b }, Act.paste) else null,
                 }) else cx.make(ui.Empty{}),
+                // Text files, if there is an editor for them.
+                if (b.canEdit()) cx.make(ui.OutlinedButton{
+                    .label = if (labels) "Edit" else "",
+                    .icon = .edit,
+                    .on_press = callback(cx, .{ .browser = b }, Act.edit),
+                }) else cx.make(ui.Empty{}),
+                if (b.editor() != null) cx.make(ui.OutlinedButton{
+                    .label = if (labels) "New text file" else "",
+                    .icon = .note_add,
+                    .on_press = if (b.file == null and b.changeable()) callback(cx, .{ .browser = b }, Act.newTextFile) else null,
+                }) else cx.make(ui.Empty{}),
                 cx.make(ui.OutlinedButton{
                     .label = if (labels) "New folder" else "",
                     .icon = .create_new_folder,
@@ -303,11 +314,11 @@ pub const Files = struct {
                     .on_press = if (b.picked() != null and b.changeable()) callback(cx, .{ .browser = b }, Act.askDelete) else null,
                 }),
             } }),
-            .new_folder => return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .spacing = 8, .children = &.{
+            .new_folder, .new_text_file => |p| return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .spacing = 8, .children = &.{
                 if (b.failure) |why|
-                    cx.make(ui.Text{ .text = cx.fmt("The folder cannot be made: {s}", .{why}), .style = failure_style, .wrap = false, .ellipsis = true })
+                    cx.make(ui.Text{ .text = cx.fmt("The {s} cannot be made: {s}", .{ if (p == .new_folder) "folder" else "file", why }), .style = failure_style, .wrap = false, .ellipsis = true })
                 else
-                    cx.make(ui.Text{ .text = "The new folder's name", .style = note_style, .wrap = false, .ellipsis = true }),
+                    cx.make(ui.Text{ .text = if (p == .new_folder) "The new folder's name" else "The new text file's name (.txt is added if it has no ending)", .style = note_style, .wrap = false, .ellipsis = true }),
                 cx.make(ui.Row{ .spacing = 12, .children = &.{
                     cx.make(ui.Expanded{ .child = cx.make(ui.TextField{
                         .placeholder = "Name",
@@ -467,6 +478,14 @@ const Act = struct {
         a.browser.request(.{ .prompt = .new_folder });
     }
 
+    fn newTextFile(a: *const Act) void {
+        a.browser.request(.{ .prompt = .new_text_file });
+    }
+
+    fn edit(a: *const Act) void {
+        a.browser.request(.edit);
+    }
+
     fn askDelete(a: *const Act) void {
         a.browser.request(.{ .prompt = .delete });
     }
@@ -475,8 +494,9 @@ const Act = struct {
         a.browser.request(.{ .prompt = .none });
     }
 
+    /// Makes the folder, or text file, named.
     fn make(a: *const Act) void {
-        a.browser.request(.make_folder);
+        a.browser.request(if (a.browser.prompt == .new_text_file) .make_text_file else .make_folder);
     }
 
     fn delete(a: *const Act) void {
@@ -560,6 +580,12 @@ const MenuAct = struct {
     fn newFolder(b: *Browser) void {
         b.request(.{ .prompt = .new_folder });
     }
+    fn newTextFile(b: *Browser) void {
+        b.request(.{ .prompt = .new_text_file });
+    }
+    fn edit(b: *Browser) void {
+        b.request(.edit);
+    }
 };
 
 /// Shows a menu where it is asked for (the right button, or a touch held
@@ -583,7 +609,16 @@ const MenuArea = struct {
         if (self.index) |i| {
             if (i >= b.listing.entries.len) return false;
             b.request(.{ .pick = i });
-            n.ui.openMenu(n, at, &.{
+            // Text files can be edited, if there is an editor.
+            const item = b.listing.entries[i];
+            const editable = b.editor() != null and item.kind == .file and fs.isTextName(item.name);
+            n.ui.openMenu(n, at, if (editable) &.{
+                .{ .label = "Open", .on_press = .of(b, MenuAct.open) },
+                .{ .label = "Edit", .on_press = .of(b, MenuAct.edit) },
+                .{ .label = "Copy", .shortcut = "Ctrl+C", .on_press = .of(b, MenuAct.copy) },
+                .{ .label = "Cut", .shortcut = "Ctrl+X", .enabled = changeable, .on_press = .of(b, MenuAct.cut) },
+                .{ .label = "Delete", .shortcut = "Delete", .enabled = changeable, .on_press = .of(b, MenuAct.delete) },
+            } else &.{
                 .{ .label = "Open", .on_press = .of(b, MenuAct.open) },
                 .{ .label = "Copy", .shortcut = "Ctrl+C", .on_press = .of(b, MenuAct.copy) },
                 .{ .label = "Cut", .shortcut = "Ctrl+X", .enabled = changeable, .on_press = .of(b, MenuAct.cut) },
@@ -591,7 +626,11 @@ const MenuArea = struct {
             });
         } else {
             if (b.file != null) return false;
-            n.ui.openMenu(n, at, &.{
+            n.ui.openMenu(n, at, if (b.editor() != null) &.{
+                .{ .label = "Paste", .shortcut = "Ctrl+V", .enabled = b.canPaste(), .on_press = .of(b, MenuAct.paste) },
+                .{ .label = "New folder", .enabled = changeable, .on_press = .of(b, MenuAct.newFolder) },
+                .{ .label = "New text file", .enabled = changeable, .on_press = .of(b, MenuAct.newTextFile) },
+            } else &.{
                 .{ .label = "Paste", .shortcut = "Ctrl+V", .enabled = b.canPaste(), .on_press = .of(b, MenuAct.paste) },
                 .{ .label = "New folder", .enabled = changeable, .on_press = .of(b, MenuAct.newFolder) },
             });
@@ -1242,6 +1281,58 @@ test "making a folder, and deleting: asked at the bottom, warning that a folder 
     b.request(.{ .prompt = .delete });
     Frame(u, &b, &n, .{ 1600, 900 });
     try testing.expect(findText(u.root.?, "Delete \u{201c}b-file\u{201d}? This cannot be undone.") != null);
+}
+
+fn noLaunch(program: [:0]const u8, path: [:0]const u8) bool {
+    _ = program;
+    _ = path;
+    return true;
+}
+
+test "New text file and Edit: shown only with an editor, and Edit only for text" {
+    var t: fs.TestTree = .{};
+    try t.init();
+    defer t.deinit();
+    var b = try Browser.init(testing.allocator, t.path);
+    defer b.deinit();
+    b.launcher = noLaunch;
+    const f = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &f);
+    defer u.destroy();
+    var n: u64 = 0;
+    const Frame = struct {
+        fn draw(uu: *ui.Ui, bb: *Browser, nn: *u64) void {
+            _ = bb.apply();
+            nn.* += 1;
+            uu.frame(1600, 900, nn.*, Files{ .browser = bb, .width = 1600 });
+        }
+    }.draw;
+    b.apps_dir = "/nonexistent";
+    b.findEditor();
+    Frame(u, &b, &n);
+    try testing.expect(findText(u.root.?, "New text file") == null);
+    try testing.expect(findText(u.root.?, "Edit") == null);
+
+    // An editor is installed.
+    var buf: [256]u8 = undefined;
+    const apps = try std.fmt.bufPrintZ(&buf, "{s}/apps", .{t.path});
+    try fs.makeFolder(t.path, "apps");
+    try fs.makeFolder(apps, "ed");
+    var hbuf: [256]u8 = undefined;
+    try sys.files.writeNew(try std.fmt.bufPrintZ(&hbuf, "{s}/ed/ed.handles", .{apps}), "text/plain\n");
+    b.apps_dir = apps;
+    b.findEditor();
+    Frame(u, &b, &n);
+    click(u, up(findText(u.root.?, "New text file").?, ui.OutlinedButton).?);
+    Frame(u, &b, &n);
+    try testing.expect(findTextPrefix(u.root.?, "The new text file's name") != null);
+    b.setName("todo");
+    click(u, up(findText(u.root.?, "Make").?, ui.OutlinedButton).?);
+    Frame(u, &b, &n);
+    try testing.expectEqualStrings("todo.txt", b.picked().?.name);
+    // Picked, it can be edited.
+    try testing.expect(findText(u.root.?, "Edit") != null);
+    try testing.expect(!overflows(u.root.?));
 }
 
 test "USB drives in the tree, with what they hold, and ejecting them" {
