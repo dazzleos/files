@@ -41,6 +41,9 @@ const Layout = browser_mod.Layout;
 /// window's size; a bigger window shows more.
 pub const min_size = [2]u32{ 640, 420 };
 
+/// The size the window opens at: the folder tree beside a few columns of files.
+pub const open_size = [2]u32{ 1024, 680 };
+
 /// The most rows the tree shows.
 pub const max_tree_rows = 2000;
 
