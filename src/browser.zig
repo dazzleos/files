@@ -790,8 +790,7 @@ test "the newest first, and the item picked stays picked; and the list" {
     // b-file older than c-tool.
     var z: [128]u8 = undefined;
     for ([_]struct { []const u8, isize }{ .{ "b-file", 1_000_000_000 }, .{ "c-tool", 2_000_000_000 } }) |f| {
-        const times = [2]std.os.linux.timespec{ .{ .sec = f[1], .nsec = 0 }, .{ .sec = f[1], .nsec = 0 } };
-        _ = std.os.linux.utimensat(std.os.linux.AT.FDCWD, try std.fmt.bufPrintZ(&z, "{s}/{s}", .{ t.path, f[0] }), &times, 0);
+        try sys.setFileTimes(std.os.linux.AT.FDCWD, try std.fmt.bufPrintZ(&z, "{s}/{s}", .{ t.path, f[0] }), f[1], 0);
     }
     var b = try Browser.init(testing.allocator, t.path);
     defer b.deinit();

@@ -263,9 +263,7 @@ pub const Copier = struct {
             if (test_chunk_delay_ms > 0) sys.sleepMs(test_chunk_delay_ms);
         }
         // All of it: as the original was.
-        const sec = std.math.lossyCast(isize, st.mtime.sec);
-        const times = [2]linux.timespec{ .{ .sec = sec, .nsec = @intCast(st.mtime.nsec) }, .{ .sec = sec, .nsec = @intCast(st.mtime.nsec) } };
-        _ = linux.futimens(dst, &times);
+        sys.setFileTimes(dst, null, st.mtime.sec, st.mtime.nsec) catch {};
         whole = true;
     }
 };

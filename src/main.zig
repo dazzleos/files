@@ -259,7 +259,5 @@ fn drained(fd: linux.fd_t) bool {
 
 /// The time now, in seconds since 1970.
 fn realNow() i64 {
-    var ts: linux.timespec = undefined;
-    _ = linux.clock_gettime(.REALTIME, &ts);
-    return ts.sec;
+    return sys.realtimeSec();
 }
