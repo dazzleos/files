@@ -6,11 +6,13 @@
 //! to show.
 
 const std = @import("std");
+const sys = @import("sys");
 const ui = @import("ui");
 const gfx = @import("gfx");
 const font = @import("font");
 const content = @import("content.zig");
 const decode = @import("decode.zig");
+const video = @import("video");
 const fs = @import("fs.zig");
 
 const Content = content.Content;
@@ -26,6 +28,7 @@ pub fn view(cx: *ui.Context, c: *const Content, width: f32) ui.Widget {
         .empty => message(cx, "This file is empty"),
         .text => |lines| textView(cx, lines),
         .image => |*img| cx.make(ui.Padding{ .padding = .all(16), .child = cx.make(ui.Center{ .child = cx.make(ui.Image{ .image = &img.image }) }) }),
+        .video => |player| cx.make(ui.VideoPlayer{ .player = player }),
         .font => |*f| fontView(cx, f),
         .binary => hexView(cx, c.data, width),
     };
@@ -43,6 +46,16 @@ pub fn describe(cx: *ui.Context, c: *const Content) []const u8 {
             cx.fmt("{s}, {d} × {d} (shown at {d} × {d})", .{ img.format.label(), full[0], full[1], img.image.width, img.image.height })
         else
             cx.fmt("{s}, {d} × {d}", .{ img.format.label(), img.image.width, img.image.height }),
+        .video => |player| blk: {
+            var dur_buf: [32]u8 = undefined;
+            const dur = video.formatDuration(&dur_buf, player.stream.duration_us);
+            break :blk cx.fmt("{s} video, {d} × {d}  ·  {s}", .{
+                player.stream.codec.name(),
+                player.stream.width,
+                player.stream.height,
+                dur,
+            });
+        },
         .font => "Font",
         .binary => cx.fmt("Bytes, in hexadecimal and as text{s}", .{first}),
     };
@@ -228,4 +241,64 @@ test "rows of bytes line up, the text after the bytes" {
     var eight = p;
     eight.per_row = 8;
     try testing.expect(eight.width() < p.width() / 2 + p.hex * 10);
+}
+
+test "video viewer describes the video and renders transport controls" {
+    const fira = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &fira);
+    defer u.destroy();
+
+    var frames = [_]video.Sample{
+        .{ .offset = 0, .size = 8, .pts_us = 0, .keyframe = true },
+        .{ .offset = 8, .size = 8, .pts_us = 5_000_000, .keyframe = true },
+    };
+    var pixels: [64 * 48]u32 = @splat(0xff224466);
+    var player: video.Player = .{
+        .gpa = testing.allocator,
+        .stream = .{
+            .gpa = testing.allocator,
+            .fd = -1,
+            .owns_fd = false,
+            .codec = .h264,
+            .width = 1280,
+            .height = 720,
+            .duration_us = 10_000_000,
+            .samples = &frames,
+            .header = &.{},
+        },
+        .image = .init(&pixels, 64, 48),
+        .hw_unavailable = true,
+    };
+    const c: Content = .{
+        .arena = .init(testing.allocator),
+        .kind = .{ .video = &player },
+    };
+
+    const Wrapper = struct {
+        content: *const Content,
+        desc: *[]const u8,
+        pub fn build(self: *const @This(), cx: *ui.Context) ui.Widget {
+            self.desc.* = describe(cx, self.content);
+            return view(cx, self.content, 700);
+        }
+    };
+    var desc: []const u8 = "";
+    u.frame(700, 500, 0, Wrapper{ .content = &c, .desc = &desc });
+    try testing.expectEqualStrings("H.264 video, 1280 × 720  ·  0:10", desc);
+
+    const Find = struct {
+        fn first(node: *ui.Node, comptime T: type) ?*ui.Node {
+            if (node.widget.is(T)) return node;
+            for (node.children.items) |ch| if (first(ch, T)) |n| return n;
+            return null;
+        }
+    };
+    try testing.expect(Find.first(u.root.?, ui.Image) != null);
+    const seek = Find.first(u.root.?, ui.video_player.SeekTrack).?;
+    const at = seek.position();
+    const click: ui.Point = .{ at[0] + seek.size.w * 0.75, at[1] + seek.size.h * 0.5 };
+    u.pointerMotion(click);
+    u.pointerButton(click, ui.btn_left, true);
+    u.pointerButton(click, ui.btn_left, false);
+    try testing.expectEqual(@as(u64, 5_000_000), player.position_us);
 }

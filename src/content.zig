@@ -9,6 +9,7 @@ const sys = @import("sys");
 const gfx = @import("gfx");
 const font = @import("font");
 const decode = @import("decode.zig");
+const video = @import("video");
 
 /// The most read of a file.
 pub const max_read = 8 * 1024 * 1024;
@@ -18,6 +19,8 @@ pub const Kind = union(enum) {
     /// its lines (tabs made spaces).
     text: []const []const u8,
     image: struct { format: decode.Format, image: gfx.Image, full: ?[2]u32 },
+    /// A video, decoded in hardware.
+    video: *video.Player,
     /// A font (TrueType outlines).
     font: font.Font,
     binary,
@@ -47,6 +50,7 @@ pub const Content = struct {
     }
 
     pub fn deinit(c: *Content) void {
+        if (c.kind == .video) c.kind.video.destroy();
         c.arena.deinit();
     }
 
@@ -55,7 +59,26 @@ pub const Content = struct {
         const path_z = a.dupeZ(u8, path) catch return error.OutOfMemory;
         // Not waiting for files that would (in /proc, say).
         const fd = try sys.open(path_z, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true });
-        defer sys.close(fd);
+        var keep_fd = false;
+        defer if (!keep_fd) sys.close(fd);
+
+        // Videos stream from their open file descriptor, so even files
+        // larger than `max_read` can play.
+        var stx: linux.Statx = undefined;
+        if (linux.errno(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .TYPE = true, .SIZE = true }, &stx)) == .SUCCESS and
+            (stx.mode & linux.S.IFMT) == linux.S.IFREG and stx.size >= 8)
+        {
+            var head: [64]u8 = undefined;
+            const rc = linux.pread(fd, &head, head.len, 0);
+            if (linux.errno(rc) == .SUCCESS and rc >= 8 and video.looksLikeVideo(head[0..rc])) {
+                if (video.Player.open(c.arena.child_allocator, fd, stx.size, true, sys.nowNs())) |player| {
+                    keep_fd = true;
+                    c.kind = .{ .video = player };
+                    return;
+                } else |_| {}
+            }
+        }
+
         var data: std.ArrayList(u8) = .empty;
         // Until the end (files in /proc and /sys say they are empty).
         while (data.items.len <= max_read) {
@@ -176,6 +199,21 @@ test "files are told apart by what they hold" {
     var f = Content.read(gpa, path);
     defer f.deinit();
     try testing.expect(f.kind == .font);
+
+    const mp4 = try video.buildTestMp4(
+        gpa,
+        &.{ 0x67, 0x42, 0xc0, 0x1e, 0xd9, 0x01, 0x41, 0xfb, 0x80 },
+        &.{ 0x68, 0xce, 0x3c, 0x80 },
+        &.{ 0, 0, 0, 4, 0x65, 0x88, 0x84, 0x21 },
+        &.{ 0, 0, 0, 4, 0x41, 0x9a, 0x24, 0x6c },
+    );
+    defer gpa.free(mp4);
+    try writeFile(path, mp4);
+    var vid = Content.read(gpa, path);
+    defer vid.deinit();
+    try testing.expect(vid.kind == .video);
+    try testing.expectEqual(@as(u32, 320), vid.kind.video.stream.width);
+    try testing.expectEqual(@as(u32, 240), vid.kind.video.stream.height);
 
     try writeFile(path, "");
     var empty = Content.read(gpa, path);

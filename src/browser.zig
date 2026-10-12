@@ -651,6 +651,24 @@ pub const Browser = struct {
         b.file = null;
     }
 
+    /// Advances the open video's playback, if a video is shown.
+    pub fn stepVideo(b: *Browser, now_ns: u64) bool {
+        const f = &(b.file orelse return false);
+        return switch (f.kind) {
+            .video => |player| player.step(now_ns),
+            else => false,
+        };
+    }
+
+    /// How long before the open video needs another step, if it is playing.
+    pub fn videoWakeNs(b: *const Browser) ?u64 {
+        const f = &(b.file orelse return null);
+        return switch (f.kind) {
+            .video => |player| player.nextWakeNs(),
+            else => null,
+        };
+    }
+
     /// The path of the file shown (in `gpa`), if one is.
     pub fn filePath(b: *const Browser, gpa: std.mem.Allocator) ?[]u8 {
         if (b.file == null) return null;
@@ -1095,7 +1113,7 @@ test "copying and pasting, cutting and pasting, and dropping onto a folder" {
     b.request(.{ .drop = .{ .index = tool, .into = folder, .copy = true } });
     _ = b.apply();
     finish(&b);
-    try testing.expectEqualStrings("\u{201c}c-tool\u{201d} was copied to " ++ "", b.notice().?[0 .. "\u{201c}c-tool\u{201d} was copied to ".len]);
+    try testing.expectEqualStrings("\u{201c}c-tool\u{201d} was copied to " ++ "", b.notice().?[0.."\u{201c}c-tool\u{201d} was copied to ".len]);
     b.request(.{ .drop = .{ .index = tool, .into = folder } });
     _ = b.apply();
     finish(&b);

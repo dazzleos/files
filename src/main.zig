@@ -28,6 +28,9 @@ const key_backspace = 14;
 const key_c = 46;
 const key_x = 45;
 const key_v = 47;
+const key_space = 57;
+const key_left = 105;
+const key_right = 106;
 const key_delete = 111;
 const key_escape = 1;
 
@@ -72,7 +75,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     a.win.wake_fd = drives_fd;
 
     var last_progress: u64 = 0;
-    while (try a.step(if (browser.copying()) progress_ns else 60 * std.time.ns_per_s)) {
+    while (try a.step(browser.videoWakeNs() orelse if (browser.copying()) progress_ns else 60 * std.time.ns_per_s)) {
         if (a.suspended_changed and !a.suspended) {
             // An editor may have been installed or removed meanwhile.
             browser.findEditor();
@@ -89,6 +92,18 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
                     key_c => if (!typing and a.ui.ctrl > 0) browser.request(.copy),
                     key_x => if (!typing and a.ui.ctrl > 0) browser.request(.cut),
                     key_v => if (!typing and a.ui.ctrl > 0) browser.request(.paste),
+                    key_space => if (!typing and browser.prompt == .none) if (browser.file) |*f| switch (f.kind) {
+                        .video => |player| player.togglePlay(now),
+                        else => {},
+                    },
+                    key_left => if (!typing and browser.prompt == .none) if (browser.file) |*f| switch (f.kind) {
+                        .video => |player| player.seekTo(player.position_us -| 5_000_000, now),
+                        else => {},
+                    },
+                    key_right => if (!typing and browser.prompt == .none) if (browser.file) |*f| switch (f.kind) {
+                        .video => |player| player.seekTo(player.position_us + 5_000_000, now),
+                        else => {},
+                    },
                     else => {},
                 };
                 a.dirty = true;
@@ -101,6 +116,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         };
         // What the clicks asked for, now that no widget is handling them.
         if (browser.apply()) a.dirty = true;
+        if (browser.stepVideo(now)) a.dirty = true;
 
         // Copying (on its own thread): the window is drawn again, to say
         // how far it has got, a few times a second, and when it is done.
