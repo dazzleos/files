@@ -98,7 +98,7 @@ pub const Files = struct {
                             .padding = .symmetric(8, 8),
                             .child = rows,
                         }) }) }),
-                        divider(cx, .horizontal),
+                        cx.make(ui.Divider{}),
                         // Whether the system's files are shown, or only the
                         // user's.
                         cx.make(ui.Padding{ .padding = .symmetric(16, 8), .child = cx.make(ui.Switch{
@@ -165,7 +165,7 @@ pub const Files = struct {
             }) }) }).withKey(pathKey(b.path)),
             .list => cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
                 listHeader(cx, self.showModified()),
-                divider(cx, .horizontal),
+                cx.make(ui.Divider{}),
                 cx.make(ui.Expanded{ .child = cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .symmetric(8, 4), .child = cx.make(ui.LazyGrid{
                     .count = b.listing.entries.len,
                     .cell = .{ .w = std.math.inf(f32), .h = list_row_height },
@@ -186,12 +186,12 @@ pub const Files = struct {
             }),
             cx.make(ui.Expanded{ .child = cx.make(ui.Row{ .cross_axis_alignment = .stretch, .children = &.{
                 tree,
-                divider(cx, .vertical),
+                cx.make(ui.Divider{ .axis = .vertical }),
                 cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
                     header,
-                    divider(cx, .horizontal),
+                    cx.make(ui.Divider{}),
                     cx.make(ui.Expanded{ .child = cx.make(MenuArea{ .browser = b, .child = content }) }),
-                    divider(cx, .horizontal),
+                    cx.make(ui.Divider{}),
                     footer,
                 } }) }),
             } }) }),
@@ -656,11 +656,6 @@ fn message(cx: *ui.Context, text: []const u8) ui.Widget {
     }) }) });
 }
 
-fn divider(cx: *ui.Context, axis: ui.Axis) ui.Widget {
-    const line = cx.make(ui.Decorated{ .color = cx.theme().outline_variant });
-    return cx.make(if (axis == .vertical) ui.SizedBox{ .width = 1, .child = line } else ui.SizedBox{ .height = 1, .child = line });
-}
-
 /// A folder in the tree: an arrow that opens or closes it there (if there
 /// are folders in it), its icon and its name (with a lock beside it if it
 /// cannot be changed), indented by how deep it is.
@@ -696,7 +691,7 @@ pub const TreeRow = struct {
             cx.make(ui.SizedBox{ .width = 24, .height = 24, .child = cx.make(ui.Icon{ .icon = .usb, .size = 22, .color = t.primary }) })
         else
             cx.make(FileIcon{ .kind = .folder, .icon = if (self.user_files) .person else null, .size = 24 });
-        const eject: ?ui.Widget = if (self.on_eject) |on| cx.make(IconButton{ .icon = .eject, .size = 28, .on_press = on }) else null;
+        const eject: ?ui.Widget = if (self.on_eject) |on| cx.make(ui.IconButton{ .icon = .eject, .size = 28, .icon_size = 21, .on_press = on }) else null;
         const name = cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = self.label, .style = .{ .size = 17 }, .wrap = false, .ellipsis = true }) });
         return cx.make(ui.DropTarget{ .on_drop = self.on_drop, .radius = height / 2, .child = cx.make(ui.Pressable{ .on_press = self.on_open, .interaction = &state.interaction, .child = cx.make(ui.Decorated{
             .color = highlight,
@@ -721,45 +716,13 @@ const Disclosure = struct {
     size: f32,
     on_press: ?ui.Callback,
 
-    pub const State = struct {
-        interaction: ui.Interaction = .{},
-    };
-
-    pub fn build(self: *const Disclosure, cx: *ui.Context, state: *State) ui.Widget {
-        const t = cx.theme();
-        return cx.make(ui.Pressable{ .on_press = self.on_press, .interaction = &state.interaction, .child = cx.make(ui.Decorated{
-            .color = if (state.interaction.hovered) t.on_surface.withAlpha(0.08) else null,
-            .radius = .all(self.size / 2),
-            .child = cx.make(ui.SizedBox{ .width = self.size, .height = self.size, .child = cx.make(ui.Icon{
-                .icon = if (self.expanded) .expand_more else .chevron_right,
-                .size = @round(self.size * 0.75),
-                .color = t.on_surface_variant,
-            }) }),
-        }) });
-    }
-};
-
-/// A round button that is an icon (ejecting a drive).
-const IconButton = struct {
-    icon: ui.icons.Icon,
-    size: f32,
-    on_press: ?ui.Callback,
-
-    pub const State = struct {
-        interaction: ui.Interaction = .{},
-    };
-
-    pub fn build(self: *const IconButton, cx: *ui.Context, state: *State) ui.Widget {
-        const t = cx.theme();
-        return cx.make(ui.Pressable{ .on_press = self.on_press, .interaction = &state.interaction, .child = cx.make(ui.Decorated{
-            .color = if (state.interaction.hovered) t.on_surface.withAlpha(0.08) else null,
-            .radius = .all(self.size / 2),
-            .child = cx.make(ui.SizedBox{ .width = self.size, .height = self.size, .child = cx.make(ui.Icon{
-                .icon = self.icon,
-                .size = @round(self.size * 0.75),
-                .color = t.on_surface_variant,
-            }) }),
-        }) });
+    pub fn build(self: *const Disclosure, cx: *ui.Context) ui.Widget {
+        return cx.make(ui.IconButton{
+            .icon = if (self.expanded) .expand_more else .chevron_right,
+            .size = self.size,
+            .icon_size = @round(self.size * 0.75),
+            .on_press = self.on_press,
+        });
     }
 };
 
@@ -1386,7 +1349,7 @@ test "USB drives in the tree, with what they hold, and ejecting them" {
     Frame(u, &b, &n, .{ 1600, 900 });
     try testing.expect(findTextPrefix(u.root.?, "USB drive  \u{b7}  ") != null);
     // Ejected: back to the user's files, saying it can be taken out.
-    click(u, up(findIcon(up(findText(u.root.?, "HOLIDAY").?, TreeRow).?, .eject).?, IconButton).?);
+    click(u, up(findIcon(up(findText(u.root.?, "HOLIDAY").?, TreeRow).?, .eject).?, ui.IconButton).?);
     Frame(u, &b, &n, .{ 1600, 900 });
     try testing.expectEqualStrings(t.path, b.path);
     try testing.expect(findText(u.root.?, "You can take out \u{201c}HOLIDAY\u{201d} now") != null);
