@@ -686,20 +686,28 @@ pub const Browser = struct {
         b.file = null;
     }
 
-    /// Advances the open video's playback, if a video is shown.
+    /// Advances the open video or audio file's playback, if one is shown.
     pub fn stepVideo(b: *Browser, now_ns: u64) bool {
         const f = &(b.file orelse return false);
         return switch (f.kind) {
             .video => |player| player.step(now_ns),
+            .audio => |player| blk: {
+                const before_pos = player.positionMs();
+                const before_playing = player.playing;
+                const before_ended = player.ended;
+                _ = player.step(now_ns);
+                break :blk player.positionMs() != before_pos or player.playing != before_playing or player.ended != before_ended;
+            },
             else => false,
         };
     }
 
-    /// How long before the open video needs another step, if it is playing.
+    /// How long before the open video or audio file needs another step, if it is playing.
     pub fn videoWakeNs(b: *const Browser) ?u64 {
         const f = &(b.file orelse return null);
         return switch (f.kind) {
             .video => |player| player.nextWakeNs(),
+            .audio => |player| if (player.playing) 16 * std.time.ns_per_ms else null,
             else => null,
         };
     }
@@ -894,7 +902,7 @@ pub const Browser = struct {
                 if (b.file) |*f| {
                     if (e.kind != .file and e.kind != .program) {
                         b.closeFile();
-                    } else if (f.kind != .video or e.size != picked_size or e.modified != picked_modified) {
+                    } else if ((f.kind != .video and f.kind != .audio) or e.size != picked_size or e.modified != picked_modified) {
                         if (fs.join(b.gpa, b.path, e.name)) |fpath| {
                             defer b.gpa.free(fpath);
                             b.closeFile();

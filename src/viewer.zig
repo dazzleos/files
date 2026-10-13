@@ -13,6 +13,7 @@ const font = @import("font");
 const content = @import("content.zig");
 const decode = @import("decode.zig");
 const video = @import("video");
+const audio = @import("audio");
 const fs = @import("fs.zig");
 
 const Content = content.Content;
@@ -29,6 +30,7 @@ pub fn view(cx: *ui.Context, c: *const Content, width: f32) ui.Widget {
         .text => |lines| textView(cx, lines),
         .image => |*img| cx.make(ui.Padding{ .padding = .all(16), .child = cx.make(ui.Center{ .child = cx.make(ui.Image{ .image = &img.image }) }) }),
         .video => |player| cx.make(ui.VideoPlayer{ .player = player }),
+        .audio => |player| cx.make(ui.AudioPlayer{ .player = player }),
         .font => |*f| fontView(cx, f),
         .binary => hexView(cx, c.data, width),
     };
@@ -55,6 +57,13 @@ pub fn describe(cx: *ui.Context, c: *const Content) []const u8 {
                 player.stream.height,
                 dur,
             });
+        },
+        .audio => |player| blk: {
+            var fmt_buf: [64]u8 = undefined;
+            var dur_buf: [32]u8 = undefined;
+            const fmt = player.header.describe(&fmt_buf);
+            const dur = video.formatDuration(&dur_buf, player.durationMs() * 1000);
+            break :blk cx.fmt("{s}  ·  {s}", .{ fmt, dur });
         },
         .font => "Font",
         .binary => cx.fmt("Bytes, in hexadecimal and as text{s}", .{first}),
@@ -301,4 +310,47 @@ test "video viewer describes the video and renders transport controls" {
     u.pointerButton(click, ui.btn_left, true);
     u.pointerButton(click, ui.btn_left, false);
     try testing.expectEqual(@as(u64, 5_000_000), player.position_us);
+}
+
+test "audio viewer describes WAV files and renders transport controls" {
+    const fira = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try ui.Ui.create(testing.allocator, &fira);
+    defer u.destroy();
+
+    var wav_bytes: [44 + 44100 * 4]u8 = @splat(0);
+    audio.wav.writePcm16Header(wav_bytes[0..44], 44100, 2, 44100 * 10);
+    var player = audio.Player.openBytes(&wav_bytes).?;
+    defer player.close();
+
+    const c: Content = .{
+        .arena = .init(testing.allocator),
+        .kind = .{ .audio = &player },
+    };
+
+    const Wrapper = struct {
+        content: *const Content,
+        desc: *[]const u8,
+        pub fn build(self: *const @This(), cx: *ui.Context) ui.Widget {
+            self.desc.* = describe(cx, self.content);
+            return view(cx, self.content, 700);
+        }
+    };
+    var desc: []const u8 = "";
+    u.frame(700, 500, 0, Wrapper{ .content = &c, .desc = &desc });
+    try testing.expectEqualStrings("WAV audio, 44.1 kHz stereo  ·  0:10", desc);
+
+    const Find = struct {
+        fn first(node: *ui.Node, comptime T: type) ?*ui.Node {
+            if (node.widget.is(T)) return node;
+            for (node.children.items) |ch| if (first(ch, T)) |n| return n;
+            return null;
+        }
+    };
+    const seek = Find.first(u.root.?, ui.audio_player.SeekTrack).?;
+    const at = seek.position();
+    const click: ui.Point = .{ at[0] + seek.size.w * 0.5, at[1] + seek.size.h * 0.5 };
+    u.pointerMotion(click);
+    u.pointerButton(click, ui.btn_left, true);
+    u.pointerButton(click, ui.btn_left, false);
+    try testing.expectEqual(@as(u64, 5000), player.positionMs());
 }

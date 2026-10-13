@@ -93,14 +93,17 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
                     key_v => if (!typing and a.ui.ctrl > 0) browser.request(.paste),
                     key_space => if (!typing and browser.prompt == .none) if (browser.file) |*f| switch (f.kind) {
                         .video => |player| player.togglePlay(now),
+                        .audio => |player| player.togglePlay(),
                         else => {},
                     },
                     key_left => if (!typing and browser.prompt == .none) if (browser.file) |*f| switch (f.kind) {
                         .video => |player| player.seekTo(player.position_us -| 5_000_000, now),
+                        .audio => |player| player.seekRelativeMs(-5000),
                         else => {},
                     },
                     key_right => if (!typing and browser.prompt == .none) if (browser.file) |*f| switch (f.kind) {
                         .video => |player| player.seekTo(player.position_us + 5_000_000, now),
+                        .audio => |player| player.seekRelativeMs(5000),
                         else => {},
                     },
                     else => {},

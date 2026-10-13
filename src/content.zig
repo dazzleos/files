@@ -10,6 +10,7 @@ const gfx = @import("gfx");
 const font = @import("font");
 const decode = @import("decode.zig");
 const video = @import("video");
+const audio = @import("audio");
 
 /// The most read of a file.
 pub const max_read = 8 * 1024 * 1024;
@@ -21,6 +22,8 @@ pub const Kind = union(enum) {
     image: struct { format: decode.Format, image: gfx.Image, full: ?[2]u32 },
     /// A video, decoded in hardware.
     video: *video.Player,
+    /// A WAVE audio file, streamed from its file descriptor.
+    audio: *audio.Player,
     /// A font (TrueType outlines).
     font: font.Font,
     binary,
@@ -51,6 +54,7 @@ pub const Content = struct {
 
     pub fn deinit(c: *Content) void {
         if (c.kind == .video) c.kind.video.destroy();
+        if (c.kind == .audio) c.kind.audio.close();
         c.arena.deinit();
     }
 
@@ -62,20 +66,31 @@ pub const Content = struct {
         var keep_fd = false;
         defer if (!keep_fd) sys.close(fd);
 
-        // Videos stream from their open file descriptor, so even files
-        // larger than `max_read` can play.
+        // Videos and WAVE audio files stream from their open file descriptor,
+        // so even files larger than `max_read` can play.
         var stx: linux.Statx = undefined;
         if (linux.errno(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .TYPE = true, .SIZE = true }, &stx)) == .SUCCESS and
             (stx.mode & linux.S.IFMT) == linux.S.IFREG and stx.size >= 8)
         {
             var head: [64]u8 = undefined;
             const rc = linux.pread(fd, &head, head.len, 0);
-            if (linux.errno(rc) == .SUCCESS and rc >= 8 and video.looksLikeVideo(head[0..rc])) {
-                if (video.Player.open(c.arena.child_allocator, fd, stx.size, true, sys.nowNs())) |player| {
-                    keep_fd = true;
-                    c.kind = .{ .video = player };
-                    return;
-                } else |_| {}
+            if (linux.errno(rc) == .SUCCESS and rc >= 8) {
+                if (video.looksLikeVideo(head[0..rc])) {
+                    if (video.Player.open(c.arena.child_allocator, fd, stx.size, true, sys.nowNs())) |player| {
+                        keep_fd = true;
+                        c.kind = .{ .video = player };
+                        return;
+                    } else |_| {}
+                } else if (rc >= 12 and audio.wav.isWav(head[0..rc])) {
+                    if (audio.Player.open(fd)) |player| {
+                        const ptr = a.create(audio.Player) catch return error.OutOfMemory;
+                        ptr.* = player;
+                        ptr.owns_fd = true;
+                        keep_fd = true;
+                        c.kind = .{ .audio = ptr };
+                        return;
+                    }
+                }
             }
         }
 
@@ -214,6 +229,15 @@ test "files are told apart by what they hold" {
     try testing.expect(vid.kind == .video);
     try testing.expectEqual(@as(u32, 320), vid.kind.video.stream.width);
     try testing.expectEqual(@as(u32, 240), vid.kind.video.stream.height);
+
+    var wav_file: [44 + 4410 * 4]u8 = @splat(0);
+    audio.wav.writePcm16Header(wav_file[0..44], 44100, 2, 4410);
+    try writeFile(path, &wav_file);
+    var aud = Content.read(gpa, path);
+    defer aud.deinit();
+    try testing.expect(aud.kind == .audio);
+    try testing.expectEqual(@as(u32, 44100), aud.kind.audio.header.sample_rate);
+    try testing.expectEqual(@as(u16, 2), aud.kind.audio.header.channels);
 
     try writeFile(path, "");
     var empty = Content.read(gpa, path);
