@@ -11,10 +11,13 @@
 //! entry's name, say) is freed while events still go to it.
 
 const std = @import("std");
+const linux = std.os.linux;
 const sys = @import("sys");
 const fs = @import("fs.zig");
 const copier = @import("copier.zig");
 const content = @import("content.zig");
+
+const watch_mask = linux.IN.CREATE | linux.IN.DELETE | linux.IN.MOVED_FROM | linux.IN.MOVED_TO | linux.IN.CLOSE_WRITE | linux.IN.ATTRIB | linux.IN.DELETE_SELF | linux.IN.MOVE_SELF;
 
 pub const Action = union(enum) {
     /// Show this folder.
@@ -138,19 +141,27 @@ pub const Browser = struct {
     /// What was asked for since the last `apply`, and room for its path.
     pending: ?Action = null,
     pending_path: std.ArrayList(u8) = .empty,
+    /// An inotify descriptor watching `media_dir`, `path`, and the folders
+    /// open in the tree so the window updates when files or folders are
+    /// made, changed or removed outside Files.
+    watch_fd: ?linux.fd_t = null,
+    watches: std.ArrayList(i32) = .empty,
 
     /// Starts at `user_files` (which must last as long as the browser), showing
     /// only what is in it.
     pub fn init(gpa: std.mem.Allocator, user_files: []const u8) !Browser {
+        const rc = linux.inotify_init1(linux.IN.NONBLOCK | linux.IN.CLOEXEC);
         var b: Browser = .{
             .gpa = gpa,
             .user_files = user_files,
             .path = try gpa.dupe(u8, user_files),
             .listing = fs.Listing.read(gpa, user_files),
             .drives = fs.Listing.read(gpa, sys.media.media_dir),
+            .watch_fd = if (linux.errno(rc) == .SUCCESS) @intCast(rc) else null,
         };
         try b.expand(user_files);
         b.findEditor();
+        b.syncWatches();
         return b;
     }
 
@@ -215,6 +226,8 @@ pub const Browser = struct {
             b.gpa.free(kv.key);
         }
         if (b.rootOf(b.path) == null) b.open(b.user_files) catch {};
+        b.syncWatches();
+        _ = b.hasWatchEvents();
     }
 
     fn eject(b: *Browser, name: []const u8) void {
@@ -223,6 +236,7 @@ pub const Browser = struct {
         const path = fs.join(b.gpa, b.media_dir, name) catch return;
         defer b.gpa.free(path);
         if (fs.within(b.path, path)) b.open(b.user_files) catch {};
+        b.clearWatches();
         switch (b.ejector(name) orelse .failed) {
             .ejected => b.say("You can take out \u{201c}{s}\u{201d} now", .{name}),
             .busy => b.say("\u{201c}{s}\u{201d} is in use: close what is open on it, then eject it again", .{name}),
@@ -233,6 +247,8 @@ pub const Browser = struct {
     }
 
     pub fn deinit(b: *Browser) void {
+        if (b.watch_fd) |fd| sys.close(fd);
+        b.watches.deinit(b.gpa);
         var it = b.expanded.iterator();
         while (it.next()) |e| {
             e.value_ptr.deinit();
@@ -401,6 +417,9 @@ pub const Browser = struct {
             if (std.mem.eql(u8, b.path, c.into)) b.selected = for (b.listing.entries, 0..) |e, i| {
                 if (std.mem.eql(u8, e.name, c.name)) break i;
             } else null;
+        } else {
+            b.syncWatches();
+            _ = b.hasWatchEvents();
         }
         b.notice_len = notice_len;
     }
@@ -574,6 +593,8 @@ pub const Browser = struct {
             l.deinit();
             l.* = fs.Listing.read(b.gpa, b.path);
         }
+        b.syncWatches();
+        _ = b.hasWatchEvents();
     }
 
     /// Closes the folders at and in `path` in the tree.
@@ -606,6 +627,7 @@ pub const Browser = struct {
         b.show_system = on;
         try b.expand(b.root());
         if (b.rootOf(b.path) == null) try b.open(b.user_files) else try b.expandTo(b.path);
+        b.syncWatches();
     }
 
     /// Shows the folder at `path` (if it is within the root), opening the
@@ -622,6 +644,7 @@ pub const Browser = struct {
         b.selected = null;
         b.ask(.none);
         try b.expandTo(new);
+        b.syncWatches();
     }
 
     fn activate(b: *Browser, i: usize) !void {
@@ -683,6 +706,7 @@ pub const Browser = struct {
             l.deinit();
             b.gpa.free(kv.key);
         } else try b.expand(path);
+        b.syncWatches();
     }
 
     pub fn isExpanded(b: *const Browser, path: []const u8) bool {
@@ -715,7 +739,180 @@ pub const Browser = struct {
         errdefer l.deinit();
         try b.expanded.put(b.gpa, key, l);
     }
+
+    fn addWatch(b: *Browser, path: []const u8) void {
+        const fd = b.watch_fd orelse return;
+        var buf: [4096]u8 = undefined;
+        const path_z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return;
+        const rc = linux.inotify_add_watch(fd, path_z, watch_mask | linux.IN.ONLYDIR);
+        if (linux.errno(rc) != .SUCCESS) return;
+        const wd: i32 = @intCast(rc);
+        for (b.watches.items) |existing| if (existing == wd) return;
+        b.watches.append(b.gpa, wd) catch {};
+    }
+
+    fn clearWatches(b: *Browser) void {
+        const fd = b.watch_fd orelse return;
+        for (b.watches.items) |wd| _ = linux.inotify_rm_watch(fd, wd);
+        b.watches.clearRetainingCapacity();
+    }
+
+    /// Ensures inotify watches are registered on `media_dir`, `path`, and
+    /// all folders open in the tree (and their immediate subfolders).
+    pub fn syncWatches(b: *Browser) void {
+        if (b.watch_fd == null) return;
+        b.addWatch(b.media_dir);
+        for (b.drives.folders()) |e| {
+            if (e.link) continue;
+            var sub_buf: [4096]u8 = undefined;
+            if (std.fmt.bufPrint(&sub_buf, "{s}/{s}", .{ b.media_dir, e.name })) |sub| b.addWatch(sub) else |_| {}
+        }
+        b.addWatch(b.path);
+        var it = b.expanded.iterator();
+        while (it.next()) |kv| {
+            const dir = kv.key_ptr.*;
+            b.addWatch(dir);
+            for (kv.value_ptr.folders()) |e| {
+                if (e.link) continue;
+                var sub_buf: [4096]u8 = undefined;
+                const sub = if (std.mem.eql(u8, dir, "/"))
+                    std.fmt.bufPrint(&sub_buf, "/{s}", .{e.name}) catch continue
+                else
+                    std.fmt.bufPrint(&sub_buf, "{s}/{s}", .{ dir, e.name }) catch continue;
+                b.addWatch(sub);
+            }
+        }
+    }
+
+    /// Reads all pending inotify events from `watch_fd` and returns whether
+    /// any non-hidden file or watched folder changed.
+    fn hasWatchEvents(b: *Browser) bool {
+        const fd = b.watch_fd orelse return false;
+        var changed = false;
+        var buf: [4096]u8 align(@alignOf(linux.inotify_event)) = undefined;
+        while (true) {
+            const rc = linux.read(fd, &buf, buf.len);
+            if (linux.errno(rc) != .SUCCESS or rc == 0) return changed;
+            var at: usize = 0;
+            while (at + @sizeOf(linux.inotify_event) <= rc) {
+                const ev: *align(1) const linux.inotify_event = @ptrCast(&buf[at]);
+                const step = @sizeOf(linux.inotify_event) + ev.len;
+                if (at + step > rc) break;
+                const name_bytes = buf[at + @sizeOf(linux.inotify_event) .. at + step];
+                const name = std.mem.sliceTo(name_bytes, 0);
+                at += step;
+                if (ev.mask & watch_mask == 0) continue;
+                if (name.len > 0 and name[0] == '.') continue;
+                changed = true;
+            }
+        }
+    }
+
+    /// Checks whether any watched folder changed on disk; if so, refreshes
+    /// the drives, tree and open folder, and returns true.
+    pub fn checkWatches(b: *Browser) bool {
+        if (b.copying()) return false;
+        if (!b.hasWatchEvents()) return false;
+        b.refresh();
+        return true;
+    }
+
+    /// Re-reads the USB drives, the folders open in the tree, and the open
+    /// folder (keeping the item picked if it is still there, and updating
+    /// the file shown if it changed or was deleted).
+    pub fn refresh(b: *Browser) void {
+        b.drives.deinit();
+        b.drives = fs.Listing.read(b.gpa, b.media_dir);
+
+        while (true) {
+            var it = b.expanded.keyIterator();
+            const key = while (it.next()) |k| {
+                if (b.rootOf(k.*) == null or !folderExists(k.*)) break k.*;
+            } else break;
+            var kv = b.expanded.fetchRemove(key).?;
+            kv.value.deinit();
+            b.gpa.free(kv.key);
+        }
+
+        var it = b.expanded.iterator();
+        while (it.next()) |kv| {
+            kv.value_ptr.deinit();
+            kv.value_ptr.* = fs.Listing.read(b.gpa, kv.key_ptr.*);
+        }
+
+        if (b.rootOf(b.path) == null) {
+            b.open(b.user_files) catch {};
+            return;
+        }
+        if (!folderExists(b.path)) {
+            var target: []const u8 = fs.parent(b.path);
+            while (b.rootOf(target) != null and !folderExists(target)) {
+                const p = fs.parent(target);
+                if (std.mem.eql(u8, p, target)) break;
+                target = p;
+            }
+            const fallback = if (b.rootOf(target) != null and folderExists(target)) target else b.user_files;
+            if (!std.mem.eql(u8, b.path, fallback)) {
+                b.open(fallback) catch {};
+                return;
+            }
+        }
+
+        var picked_name_buf: [256]u8 = undefined;
+        var picked_name: ?[]const u8 = null;
+        var picked_size: u64 = 0;
+        var picked_modified: i64 = 0;
+        if (b.picked()) |e| if (e.name.len <= picked_name_buf.len) {
+            @memcpy(picked_name_buf[0..e.name.len], e.name);
+            picked_name = picked_name_buf[0..e.name.len];
+            picked_size = e.size;
+            picked_modified = e.modified;
+        };
+
+        b.listing.deinit();
+        b.listing = fs.Listing.read(b.gpa, b.path);
+        b.listing.sort(b.order);
+
+        if (picked_name) |name| {
+            b.selected = for (b.listing.entries, 0..) |e, i| {
+                if (std.mem.eql(u8, e.name, name)) break i;
+            } else null;
+            if (b.selected) |i| {
+                const e = b.listing.entries[i];
+                if (b.file) |*f| {
+                    if (e.kind != .file and e.kind != .program) {
+                        b.closeFile();
+                    } else if (f.kind != .video or e.size != picked_size or e.modified != picked_modified) {
+                        if (fs.join(b.gpa, b.path, e.name)) |fpath| {
+                            defer b.gpa.free(fpath);
+                            b.closeFile();
+                            b.file = content.Content.read(b.gpa, fpath);
+                        } else |_| {}
+                    }
+                }
+                if (b.prompt == .delete and e.kind == .folder and !e.link) {
+                    b.delete_count = b.countPicked();
+                }
+            } else {
+                b.closeFile();
+                if (b.prompt == .delete) b.ask(.none);
+            }
+        } else {
+            b.selected = null;
+            b.closeFile();
+        }
+
+        b.syncWatches();
+    }
 };
+
+fn folderExists(path: []const u8) bool {
+    var buf: [4096]u8 = undefined;
+    const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return false;
+    var stx: linux.Statx = undefined;
+    if (linux.errno(linux.statx(linux.AT.FDCWD, z, 0, .{ .TYPE = true }, &stx)) != .SUCCESS) return false;
+    return stx.mode & linux.S.IFMT == linux.S.IFDIR;
+}
 
 /// Asks the media manager, giving it time to write what is left.
 fn askEject(name: []const u8) ?sys.media.Answer {
@@ -1159,3 +1356,47 @@ test "cancelling a copy" {
     defer l.deinit();
     try testing.expectEqual(@as(usize, 0), l.entries.len);
 }
+
+test "watching folders: external files and folders made, changed and deleted update the listing, tree and viewer" {
+    var t: fs.TestTree = .{};
+    try t.init();
+    defer t.deinit();
+    var b = try Browser.init(testing.allocator, t.path);
+    defer b.deinit();
+    try testing.expect(!b.checkWatches());
+
+    // Open b-file in the viewer.
+    b.request(.{ .activate = 2 });
+    _ = b.apply();
+    try testing.expectEqualStrings("b-file", b.picked().?.name);
+    try testing.expectEqualStrings("hello", b.file.?.kind.text[0]);
+
+    // A new file "a-first.txt" is created externally before "b-file":
+    // checkWatches detects it, adds it to the listing, and keeps "b-file"
+    // selected at its new index.
+    try t.write("a-first.txt", "new file\n", 0o644);
+    try testing.expect(b.checkWatches());
+    try testing.expect(!b.checkWatches());
+    try testing.expectEqual(@as(usize, 6), b.listing.entries.len);
+    try testing.expectEqualStrings("a-first.txt", b.listing.entries[2].name);
+    try testing.expectEqualStrings("b-file", b.picked().?.name);
+    try testing.expectEqual(@as(?usize, 3), b.selected);
+
+    // Modifying "b-file" externally updates the open file viewer and size.
+    try t.write("b-file", "updated text", 0o644);
+    try testing.expect(b.checkWatches());
+    try testing.expectEqualStrings("updated text", b.file.?.kind.text[0]);
+    try testing.expectEqual(@as(u64, 12), b.picked().?.size);
+
+    // Creating a new folder externally updates both the listing and the tree.
+    try fs.makeFolder(t.path, "New-folder");
+    try testing.expect(b.checkWatches());
+    try testing.expectEqual(@as(usize, 3), b.subfolders(t.path).len);
+
+    // Deleting the open file externally clears the selection and closes the viewer.
+    try fs.delete(t.path, "b-file");
+    try testing.expect(b.checkWatches());
+    try testing.expect(b.selected == null);
+    try testing.expect(b.file == null);
+}
+

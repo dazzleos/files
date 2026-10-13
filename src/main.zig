@@ -70,9 +70,8 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
     // The user's files, on the SD card.
     var browser = try browser_mod.Browser.init(gpa, sys.system.user_dir);
     defer browser.deinit();
-    // USB drives come and go as their folders do in /media.
-    const drives_fd = watchDrives();
-    a.win.wake_fd = drives_fd;
+    // Watch the open folder, the folders open in the tree, and /media.
+    a.win.wake_fd = browser.watch_fd;
 
     var last_progress: u64 = 0;
     while (try a.step(browser.videoWakeNs() orelse if (browser.copying()) progress_ns else 60 * std.time.ns_per_s)) {
@@ -110,12 +109,9 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
             },
             else => a.ui.handleInput(e),
         };
-        if (drives_fd) |fd| if (drained(fd)) {
-            browser.refreshDrives();
-            a.dirty = true;
-        };
         // What the clicks asked for, now that no widget is handling them.
         if (browser.apply()) a.dirty = true;
+        if (browser.checkWatches()) a.dirty = true;
         if (browser.stepVideo(now)) a.dirty = true;
 
         // Copying (on its own thread): the window is drawn again, to say
@@ -144,32 +140,8 @@ test {
     _ = view;
 }
 
-/// A file that can be read when a folder is made or removed in /media
-/// (as drives are mounted and unmounted).
-fn watchDrives() ?linux.fd_t {
-    const rc = linux.inotify_init1(linux.IN.NONBLOCK | linux.IN.CLOEXEC);
-    if (linux.errno(rc) != .SUCCESS) return null;
-    const fd: linux.fd_t = @intCast(rc);
-    const mask = linux.IN.CREATE | linux.IN.DELETE | linux.IN.MOVED_FROM | linux.IN.MOVED_TO;
-    if (linux.errno(linux.inotify_add_watch(fd, sys.media.media_dir, mask)) != .SUCCESS) {
-        sys.close(fd);
-        return null;
-    }
-    return fd;
-}
-
-/// Whether anything happened on the inotify file `fd`, reading it all.
-fn drained(fd: linux.fd_t) bool {
-    var any = false;
-    var buf: [1024]u8 align(@alignOf(linux.inotify_event)) = undefined;
-    while (true) {
-        const rc = linux.read(fd, &buf, buf.len);
-        if (linux.errno(rc) != .SUCCESS or rc == 0) return any;
-        any = true;
-    }
-}
-
 /// The time now, in seconds since 1970.
 fn realNow() i64 {
     return sys.realtimeSec();
 }
+
