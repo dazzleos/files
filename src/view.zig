@@ -270,7 +270,7 @@ pub const Files = struct {
         const t = cx.theme();
         const b = self.browser;
         // In a narrow window, the buttons are their icons alone.
-        const labels = self.width >= 1000;
+        const labels = self.width >= 1200;
         const note_style: ui.TextStyle = .{ .size = 16, .color = t.on_surface_variant };
         const failure_style: ui.TextStyle = .{ .size = 16, .color = t.@"error" };
         const cancel = cx.make(ui.OutlinedButton{ .label = if (labels) "Cancel" else "", .icon = .close, .on_press = callback(cx, .{ .browser = b }, Act.cancel) });
@@ -291,13 +291,18 @@ pub const Files = struct {
             } });
         }
         switch (b.prompt) {
-            .none => return cx.make(ui.Row{ .spacing = 12, .children = &.{
+            .none => return cx.make(ui.Row{ .spacing = if (labels) 12 else 8, .children = &.{
                 cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = self.status(cx), .style = note_style, .wrap = false, .ellipsis = true }) }),
                 // What was copied or cut, while there is something.
                 if (b.clip_path != null) cx.make(ui.OutlinedButton{
                     .label = if (labels) "Paste" else "",
                     .icon = .content_paste,
                     .on_press = if (b.canPaste()) callback(cx, .{ .browser = b }, Act.paste) else null,
+                }) else cx.make(ui.Empty{}),
+                if (b.canView()) cx.make(ui.OutlinedButton{
+                    .label = if (labels) "View" else "",
+                    .icon = .visibility,
+                    .on_press = callback(cx, .{ .browser = b }, Act.view),
                 }) else cx.make(ui.Empty{}),
                 // Text files, if there is an editor for them.
                 if (b.canEdit()) cx.make(ui.OutlinedButton{
@@ -489,6 +494,10 @@ const Act = struct {
         a.browser.request(.{ .prompt = .new_text_file });
     }
 
+    fn view(a: *const Act) void {
+        a.browser.request(.view);
+    }
+
     fn edit(a: *const Act) void {
         a.browser.request(.edit);
     }
@@ -594,6 +603,9 @@ const MenuAct = struct {
     fn newTextFile(b: *Browser) void {
         b.request(.{ .prompt = .new_text_file });
     }
+    fn view(b: *Browser) void {
+        b.request(.view);
+    }
     fn edit(b: *Browser) void {
         b.request(.edit);
     }
@@ -622,15 +634,20 @@ const MenuArea = struct {
             b.request(.{ .pick = i });
             // Text files can be edited, if there is an editor.
             const item = b.listing.entries[i];
-            const editable = b.editor() != null and item.kind == .file and fs.isTextName(item.name);
+            const viewable = item.kind == .file or item.kind == .program;
+            const editable = b.editor() != null and item.kind == .file and fs.isTextFile(b.path, item.name);
+            const first: ui.MenuItem = if (viewable)
+                .{ .label = "View", .on_press = .of(b, MenuAct.view) }
+            else
+                .{ .label = "Open", .on_press = .of(b, MenuAct.open) };
             n.ui.openMenu(n, at, if (editable) &.{
-                .{ .label = "Open", .on_press = .of(b, MenuAct.open) },
+                first,
                 .{ .label = "Edit", .on_press = .of(b, MenuAct.edit) },
                 .{ .label = "Copy", .shortcut = "Ctrl+C", .on_press = .of(b, MenuAct.copy) },
                 .{ .label = "Cut", .shortcut = "Ctrl+X", .enabled = changeable, .on_press = .of(b, MenuAct.cut) },
                 .{ .label = "Delete", .shortcut = "Delete", .enabled = changeable, .on_press = .of(b, MenuAct.delete) },
             } else &.{
-                .{ .label = "Open", .on_press = .of(b, MenuAct.open) },
+                first,
                 .{ .label = "Copy", .shortcut = "Ctrl+C", .on_press = .of(b, MenuAct.copy) },
                 .{ .label = "Cut", .shortcut = "Ctrl+X", .enabled = changeable, .on_press = .of(b, MenuAct.cut) },
                 .{ .label = "Delete", .shortcut = "Delete", .enabled = changeable, .on_press = .of(b, MenuAct.delete) },
@@ -961,6 +978,8 @@ test "the tree and the grid fit, from the smallest window to the biggest" {
     // A file shown fits too: text, and bytes (as many a row as fit).
     b.request(.{ .activate = 2 });
     _ = b.apply();
+    b.request(.view);
+    _ = b.apply();
     try testing.expect(b.file.?.kind == .text);
     for (test_sizes) |size| {
         u.frame(size[0], size[1], 0, Files{ .browser = &b, .width = @floatFromInt(size[0]) });
@@ -969,6 +988,8 @@ test "the tree and the grid fit, from the smallest window to the biggest" {
     try b.showSystem(true);
     try b.open("/proc/self");
     for (b.listing.entries, 0..) |e, i| if (std.mem.eql(u8, e.name, "auxv")) b.request(.{ .activate = i });
+    _ = b.apply();
+    b.request(.view);
     _ = b.apply();
     try testing.expect(b.file.?.kind == .binary);
     for (test_sizes) |size| {
@@ -1012,12 +1033,16 @@ test "clicking in the grid and the tree" {
     }.draw;
     Frame(u, &b, &now);
 
-    // A file is shown in place of the grid, with what it holds under its
-    // path, and the line at the bottom says what it is; Up goes back.
+    // Clicking a file picks it, showing View at the bottom; View shows
+    // the file in place of the grid, and Up goes back.
     click(u, tile(u, "b-file").?);
     Frame(u, &b, &now);
     try testing.expectEqual(@as(?usize, 2), b.selected);
+    try testing.expect(b.file == null);
     try testing.expect(findText(u.root.?, "b-file  ·  File  ·  5 bytes") != null);
+    try testing.expect(findText(u.root.?, "View") != null);
+    click(u, up(findText(u.root.?, "View").?, ui.OutlinedButton).?);
+    Frame(u, &b, &now);
     try testing.expect(findText(u.root.?, "hello") != null);
     try testing.expect(findText(u.root.?, "Text, 1 line") != null);
     var path_buf: [128]u8 = undefined;
@@ -1145,10 +1170,13 @@ test "the order and the layout: the newest first, and a list" {
     try testing.expect(findType(u.root.?, Tile) == null);
     const row = up(findText(u.root.?, "b-file").?, ListRow).?;
     try testing.expect(findText(row, "5 bytes") != null);
-    // Clicking a row picks (and shows) it, as a tile does.
+    // Clicking a row picks it, as a tile does; View shows it.
     click(u, row);
     Frame(u, &b, &n, .{ 1600, 900 });
     try testing.expectEqualStrings("b-file", b.listing.entries[b.selected.?].name);
+    try testing.expect(b.file == null);
+    click(u, up(findText(u.root.?, "View").?, ui.OutlinedButton).?);
+    Frame(u, &b, &n, .{ 1600, 900 });
     // While a file is shown, the order and layout stay as they are.
     try testing.expect(up(findText(u.root.?, "List").?, ui.OutlinedButton).?.widget.as(ui.OutlinedButton).?.on_press == null);
     b.request(.up);
@@ -1304,9 +1332,18 @@ test "New text file and Edit: shown only with an editor, and Edit only for text"
     click(u, up(findText(u.root.?, "Make").?, ui.OutlinedButton).?);
     Frame(u, &b, &n);
     try testing.expectEqualStrings("todo.txt", b.picked().?.name);
-    // Picked, it can be edited.
+    // Picked, it can be viewed and edited.
+    try testing.expect(findText(u.root.?, "View") != null);
     try testing.expect(findText(u.root.?, "Edit") != null);
-    try testing.expect(!overflows(u.root.?));
+    // Even with Paste, View, Edit, New text file, New folder, and Delete
+    // all shown, the bottom bar fits at every window size.
+    b.request(.copy);
+    Frame(u, &b, &n);
+    for (test_sizes) |size| {
+        n += 1;
+        u.frame(size[0], size[1], n, Files{ .browser = &b, .width = @floatFromInt(size[0]) });
+        try testing.expect(!overflows(u.root.?));
+    }
 }
 
 test "USB drives in the tree, with what they hold, and ejecting them" {

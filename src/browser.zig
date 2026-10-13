@@ -25,9 +25,10 @@ pub const Action = union(enum) {
     /// Open or close this folder in the tree.
     toggle: []const u8,
     /// An item in the open folder (an index into its entries): a folder
-    /// is opened, and a file shown; anything else (a device, say) is only
-    /// picked.
+    /// is opened; anything else (a file, a device, say) is picked.
     activate: usize,
+    /// Show the contents of the item picked (a file) in Files.
+    view,
     /// Back from the file shown to its folder, or else to the folder
     /// holding the open one.
     up,
@@ -298,6 +299,7 @@ pub const Browser = struct {
             .open => |path| b.open(path) catch {},
             .toggle => |path| b.toggle(path) catch {},
             .activate => |i| b.activate(i) catch {},
+            .view => b.view() catch {},
             .up => if (b.file != null) b.closeFile() else if (!b.atRoot()) b.open(fs.parent(b.path)) catch {},
             .show_system => |on| b.showSystem(on) catch {},
             .order => |o| b.sortBy(o),
@@ -508,15 +510,29 @@ pub const Browser = struct {
         return if (b.editor_len > 0) b.editor_buf[0..b.editor_len :0] else null;
     }
 
+    /// Whether the item picked is a file whose contents can be viewed.
+    pub fn canView(b: *const Browser) bool {
+        if (b.copier != null or b.file != null) return false;
+        const e = b.picked() orelse return false;
+        return e.kind == .file or e.kind == .program;
+    }
+
+    fn view(b: *Browser) !void {
+        if (!b.canView()) return;
+        const e = b.picked().?;
+        b.closeFile();
+        const path = try fs.join(b.gpa, b.path, e.name);
+        defer b.gpa.free(path);
+        b.file = content.Content.read(b.gpa, path);
+    }
+
     /// Whether the item picked is a text file the editor can open.
     pub fn canEdit(b: *const Browser) bool {
         if (b.editor() == null or b.copier != null) return false;
         const e = b.picked() orelse return false;
         if (e.kind != .file) return false;
-        if (fs.isTextName(e.name)) return true;
-        // Shown, and it is text (or nothing yet).
-        const f = b.file orelse return false;
-        return f.kind == .text or f.kind == .empty;
+        if (b.file) |f| return f.kind == .text or f.kind == .empty;
+        return fs.isTextFile(b.path, e.name);
     }
 
     fn edit(b: *Browser) void {
@@ -657,13 +673,6 @@ pub const Browser = struct {
         if (e.kind != .folder) {
             b.closeFile();
             b.selected = i;
-            // Only files are read: opening a device can do things (start
-            // the watchdog, say).
-            if (e.kind == .file or e.kind == .program) {
-                const path = try fs.join(b.gpa, b.path, e.name);
-                defer b.gpa.free(path);
-                b.file = content.Content.read(b.gpa, path);
-            }
             return;
         }
         const path = try fs.join(b.gpa, b.path, e.name);
@@ -937,17 +946,23 @@ test "opening folders, from the tree and the grid, and going up as far as the us
     try testing.expectEqual(@as(usize, 2), b.subfolders(t.path).len);
     try testing.expectEqual(@as(usize, 5), b.listing.entries.len);
 
-    // A file is shown (and picked), and Up goes back to its folder; a
-    // folder is opened.
+    // Clicking a file picks it, View shows it, and Up goes back to its
+    // folder; clicking a folder opens it.
     b.request(.{ .activate = 2 });
     try testing.expect(b.apply());
     try testing.expectEqual(@as(?usize, 2), b.selected);
+    try testing.expect(b.file == null);
+    try testing.expect(b.canView());
+    b.request(.view);
+    try testing.expect(b.apply());
     try testing.expectEqualStrings("hello", b.file.?.kind.text[0]);
     b.request(.up);
     _ = b.apply();
     try testing.expect(b.file == null);
     try testing.expectEqualStrings(t.path, b.path);
     b.request(.{ .activate = 2 });
+    _ = b.apply();
+    b.request(.view);
     _ = b.apply();
     b.request(.{ .activate = 0 });
     _ = b.apply();
@@ -1167,6 +1182,8 @@ test "making a folder, which is picked; and deleting files, and folders with wha
     try testing.expect(b.delete_count == null);
     b.request(.{ .activate = 4 });
     _ = b.apply();
+    b.request(.view);
+    _ = b.apply();
     try testing.expectEqual(Prompt.none, b.prompt);
     try testing.expectEqualStrings("c-tool", b.picked().?.name);
     try testing.expect(b.file != null);
@@ -1370,6 +1387,8 @@ test "watching folders: external files and folders made, changed and deleted upd
 
     // Open b-file in the viewer.
     b.request(.{ .activate = 2 });
+    _ = b.apply();
+    b.request(.view);
     _ = b.apply();
     try testing.expectEqualStrings("b-file", b.picked().?.name);
     try testing.expectEqualStrings("hello", b.file.?.kind.text[0]);

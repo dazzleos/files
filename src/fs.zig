@@ -300,6 +300,27 @@ pub fn isTextName(name: []const u8) bool {
     return false;
 }
 
+/// Whether the file `name` in `dir` is plain text (by its extension, or by
+/// inspecting the beginning of an extensionless file).
+pub fn isTextFile(dir: []const u8, name: []const u8) bool {
+    if (isTextName(name)) return true;
+    if (std.mem.lastIndexOfScalar(u8, name, '.') != null) return false;
+    var buf: [4096]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ dir, name }) catch return false;
+    const fd = sys.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }) catch return false;
+    defer sys.close(fd);
+    var head: [512]u8 = undefined;
+    const rc = linux.read(fd, &head, head.len);
+    if (linux.errno(rc) != .SUCCESS) return false;
+    const data = head[0..rc];
+    var cut: usize = 0;
+    while (rc == head.len and cut < 3 and cut < data.len and !std.unicode.utf8ValidateSlice(data[0 .. data.len - cut])) cut += 1;
+    const text = data[0 .. data.len - cut];
+    if (!std.unicode.utf8ValidateSlice(text)) return false;
+    for (text) |b| if ((b < 0x20 and b != '\t' and b != '\n' and b != '\r' and b != 0x0c) or b == 0x7f) return false;
+    return true;
+}
+
 /// Deletes `name` from the folder at `dir`: a file, or a folder and
 /// everything in it. A link is deleted itself, not what it leads to.
 pub fn delete(dir: []const u8, name: []const u8) ChangeError!void {
