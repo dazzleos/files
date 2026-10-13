@@ -323,6 +323,7 @@ pub const Files = struct {
                 cx.make(ui.OutlinedButton{
                     .label = if (labels) "Delete" else "",
                     .icon = .delete,
+                    .destructive = true,
                     .on_press = if (b.picked() != null and b.changeable()) callback(cx, .{ .browser = b }, Act.askDelete) else null,
                 }),
             } }),
@@ -368,7 +369,7 @@ pub const Files = struct {
                             cx.make(ui.Text{ .text = cx.fmt("It cannot be deleted: {s}", .{why}), .style = failure_style, .wrap = false, .ellipsis = true })
                         else
                             cx.make(ui.Empty{}) }),
-                        cx.make(ui.OutlinedButton{ .label = if (labels) "Delete" else "", .icon = .delete, .on_press = callback(cx, .{ .browser = b }, Act.delete) }),
+                        cx.make(ui.OutlinedButton{ .label = if (labels) "Delete" else "", .icon = .delete, .destructive = true, .on_press = callback(cx, .{ .browser = b }, Act.delete) }),
                         cancel,
                     } }),
                 } });
@@ -645,12 +646,12 @@ const MenuArea = struct {
                 .{ .label = "Edit", .on_press = .of(b, MenuAct.edit) },
                 .{ .label = "Copy", .shortcut = "Ctrl+C", .on_press = .of(b, MenuAct.copy) },
                 .{ .label = "Cut", .shortcut = "Ctrl+X", .enabled = changeable, .on_press = .of(b, MenuAct.cut) },
-                .{ .label = "Delete", .shortcut = "Delete", .enabled = changeable, .on_press = .of(b, MenuAct.delete) },
+                .{ .label = "Delete", .shortcut = "Delete", .destructive = true, .enabled = changeable, .on_press = .of(b, MenuAct.delete) },
             } else &.{
                 first,
                 .{ .label = "Copy", .shortcut = "Ctrl+C", .on_press = .of(b, MenuAct.copy) },
                 .{ .label = "Cut", .shortcut = "Ctrl+X", .enabled = changeable, .on_press = .of(b, MenuAct.cut) },
-                .{ .label = "Delete", .shortcut = "Delete", .enabled = changeable, .on_press = .of(b, MenuAct.delete) },
+                .{ .label = "Delete", .shortcut = "Delete", .destructive = true, .enabled = changeable, .on_press = .of(b, MenuAct.delete) },
             });
         } else {
             if (b.file != null) return false;
