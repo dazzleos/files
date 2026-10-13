@@ -440,7 +440,8 @@ pub const Browser = struct {
     /// The new folder's name, as it is typed (kept until it is made or
     /// asked for again).
     pub fn setName(b: *Browser, text: []const u8) void {
-        const n = @min(text.len, b.name_buf.len);
+        var n = @min(text.len, b.name_buf.len);
+        while (n > 0 and n < text.len and text[n] & 0xc0 == 0x80) n -= 1;
         @memcpy(b.name_buf[0..n], text[0..n]);
         b.name_len = n;
     }
