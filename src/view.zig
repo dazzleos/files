@@ -190,7 +190,11 @@ pub const Files = struct {
                 cx.make(ui.Expanded{ .child = cx.make(ui.Column{ .cross_axis_alignment = .stretch, .children = &.{
                     header,
                     cx.make(ui.Divider{}),
-                    cx.make(ui.Expanded{ .child = cx.make(MenuArea{ .browser = b, .child = content }) }),
+                    cx.make(ui.Expanded{ .child = cx.make(ui.Snackbar{
+                        .message = b.notice() orelse "",
+                        .on_dismiss = callback(cx, .{ .browser = b }, Act.dismissNotice),
+                        .child = cx.make(MenuArea{ .browser = b, .child = content }),
+                    }) }),
                     cx.make(ui.Divider{}),
                     footer,
                 } }) }),
@@ -288,7 +292,7 @@ pub const Files = struct {
         }
         switch (b.prompt) {
             .none => return cx.make(ui.Row{ .spacing = 12, .children = &.{
-                cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = b.notice() orelse self.status(cx), .style = note_style, .wrap = false, .ellipsis = true }) }),
+                cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = self.status(cx), .style = note_style, .wrap = false, .ellipsis = true }) }),
                 // What was copied or cut, while there is something.
                 if (b.clip_path != null) cx.make(ui.OutlinedButton{
                     .label = if (labels) "Paste" else "",
@@ -516,6 +520,10 @@ const Act = struct {
 
     fn stopCopy(a: *const Act) void {
         a.browser.request(.cancel_copy);
+    }
+
+    fn dismissNotice(a: *const Act) void {
+        a.browser.request(.dismiss_notice);
     }
 
     /// Something dragged (an item of the open folder) was dropped on the

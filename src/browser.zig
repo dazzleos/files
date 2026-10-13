@@ -65,6 +65,8 @@ pub const Action = union(enum) {
     drop: Drop,
     /// Stop copying.
     cancel_copy,
+    /// Dismiss the notice snackbar.
+    dismiss_notice,
 };
 
 pub const Drop = struct { index: usize, into: []const u8, copy: bool = false };
@@ -315,6 +317,7 @@ pub const Browser = struct {
             .paste => b.paste(),
             .drop => |d| b.drop(d),
             .cancel_copy => if (b.copier) |c| c.cancel(),
+            .dismiss_notice => {},
         }
         return true;
     }
