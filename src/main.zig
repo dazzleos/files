@@ -115,7 +115,7 @@ fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
         // What the clicks asked for, now that no widget is handling them.
         if (browser.apply()) a.dirty = true;
         if (browser.checkWatches()) a.dirty = true;
-        if (browser.stepVideo(now)) a.dirty = true;
+        if (browser.stepVideo(a.win.nextPresentationNs(now))) a.dirty = true;
 
         // Copying (on its own thread): the window is drawn again, to say
         // how far it has got, a few times a second, and when it is done.
@@ -147,4 +147,3 @@ test {
 fn realNow() i64 {
     return sys.realtimeSec();
 }
-

@@ -1430,4 +1430,3 @@ test "watching folders: external files and folders made, changed and deleted upd
     try testing.expect(b.selected == null);
     try testing.expect(b.file == null);
 }
-

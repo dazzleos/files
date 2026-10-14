@@ -291,42 +291,45 @@ pub const Files = struct {
             } });
         }
         switch (b.prompt) {
-            .none => return cx.make(ui.Row{ .spacing = if (labels) 12 else 8, .children = &.{
-                cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = self.status(cx), .style = note_style, .wrap = false, .ellipsis = true }) }),
-                // What was copied or cut, while there is something.
-                if (b.clip_path != null) cx.make(ui.OutlinedButton{
-                    .label = if (labels) "Paste" else "",
-                    .icon = .content_paste,
-                    .on_press = if (b.canPaste()) callback(cx, .{ .browser = b }, Act.paste) else null,
-                }) else cx.make(ui.Empty{}),
-                if (b.canView()) cx.make(ui.OutlinedButton{
-                    .label = if (labels) "View" else "",
-                    .icon = .visibility,
-                    .on_press = callback(cx, .{ .browser = b }, Act.view),
-                }) else cx.make(ui.Empty{}),
-                // Text files, if there is an editor for them.
-                if (b.canEdit()) cx.make(ui.OutlinedButton{
-                    .label = if (labels) "Edit" else "",
-                    .icon = .edit,
-                    .on_press = callback(cx, .{ .browser = b }, Act.edit),
-                }) else cx.make(ui.Empty{}),
-                if (b.editor() != null) cx.make(ui.OutlinedButton{
-                    .label = if (labels) "New text file" else "",
-                    .icon = .note_add,
-                    .on_press = if (b.file == null and b.changeable()) callback(cx, .{ .browser = b }, Act.newTextFile) else null,
-                }) else cx.make(ui.Empty{}),
-                cx.make(ui.OutlinedButton{
-                    .label = if (labels) "New folder" else "",
-                    .icon = .create_new_folder,
-                    .on_press = if (b.file == null and b.changeable()) callback(cx, .{ .browser = b }, Act.newFolder) else null,
-                }),
-                cx.make(ui.OutlinedButton{
-                    .label = if (labels) "Delete" else "",
-                    .icon = .delete,
-                    .destructive = true,
-                    .on_press = if (b.picked() != null and b.changeable()) callback(cx, .{ .browser = b }, Act.askDelete) else null,
-                }),
-            } }),
+            .none => return cx.make(ui.Row{
+                .spacing = if (labels) 12 else 8,
+                .children = &.{
+                    cx.make(ui.Expanded{ .child = cx.make(ui.Text{ .text = self.status(cx), .style = note_style, .wrap = false, .ellipsis = true }) }),
+                    // What was copied or cut, while there is something.
+                    if (b.clip_path != null) cx.make(ui.OutlinedButton{
+                        .label = if (labels) "Paste" else "",
+                        .icon = .content_paste,
+                        .on_press = if (b.canPaste()) callback(cx, .{ .browser = b }, Act.paste) else null,
+                    }) else cx.make(ui.Empty{}),
+                    if (b.canView()) cx.make(ui.OutlinedButton{
+                        .label = if (labels) "View" else "",
+                        .icon = .visibility,
+                        .on_press = callback(cx, .{ .browser = b }, Act.view),
+                    }) else cx.make(ui.Empty{}),
+                    // Text files, if there is an editor for them.
+                    if (b.canEdit()) cx.make(ui.OutlinedButton{
+                        .label = if (labels) "Edit" else "",
+                        .icon = .edit,
+                        .on_press = callback(cx, .{ .browser = b }, Act.edit),
+                    }) else cx.make(ui.Empty{}),
+                    if (b.editor() != null) cx.make(ui.OutlinedButton{
+                        .label = if (labels) "New text file" else "",
+                        .icon = .note_add,
+                        .on_press = if (b.file == null and b.changeable()) callback(cx, .{ .browser = b }, Act.newTextFile) else null,
+                    }) else cx.make(ui.Empty{}),
+                    cx.make(ui.OutlinedButton{
+                        .label = if (labels) "New folder" else "",
+                        .icon = .create_new_folder,
+                        .on_press = if (b.file == null and b.changeable()) callback(cx, .{ .browser = b }, Act.newFolder) else null,
+                    }),
+                    cx.make(ui.OutlinedButton{
+                        .label = if (labels) "Delete" else "",
+                        .icon = .delete,
+                        .destructive = true,
+                        .on_press = if (b.picked() != null and b.changeable()) callback(cx, .{ .browser = b }, Act.askDelete) else null,
+                    }),
+                },
+            }),
             .new_folder, .new_text_file => |p| return cx.make(ui.Column{ .cross_axis_alignment = .stretch, .spacing = 8, .children = &.{
                 if (b.failure) |why|
                     cx.make(ui.Text{ .text = cx.fmt("The {s} cannot be made: {s}", .{ if (p == .new_folder) "folder" else "file", why }), .style = failure_style, .wrap = false, .ellipsis = true })
