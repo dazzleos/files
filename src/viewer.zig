@@ -110,15 +110,22 @@ const samples = [_][]const u8{
     "0123456789 !?&@#%()[]{}",
 };
 
+const emoji_samples = [_][]const u8{
+    "😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 🙃 😉",
+    "❤️ 🧡 💛 💚 💙 💜 🚀 🌍 ⭐ 🎉 🔥 💡 🎵",
+    "👍 👍🏻 👍🏼 👍🏽 👍🏾 👍🏿 🇳🇿 🇬🇧 🇺🇸 🇯🇵",
+};
+
 fn fontView(cx: *ui.Context, f: *const font.Font) ui.Widget {
     const a = cx.ui.arena();
+    const lines: []const []const u8 = if (f.glyphIndex('A') == 0 and f.glyphIndex(0x1f600) != 0) &emoji_samples else &samples;
     var rows: std.ArrayList(ui.Widget) = .empty;
-    for (samples) |sample| rows.append(a, cx.make(ui.Text{ .text = sample, .style = .{ .size = 28, .font = f } })) catch {};
+    for (lines) |sample| rows.append(a, cx.make(ui.Text{ .text = sample, .style = .{ .size = 28, .font = f } })) catch {};
     // The first sample at sizes from small to big.
     for ([_]f32{ 12, 18, 24, 36, 48, 72 }) |size| {
         rows.append(a, cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 2, .children = &.{
             cx.make(ui.Text{ .text = cx.fmt("{d} pixels", .{size}), .style = .{ .size = 14, .color = cx.theme().on_surface_variant } }),
-            cx.make(ui.Text{ .text = samples[0], .style = .{ .size = size, .font = f }, .wrap = false, .ellipsis = true }),
+            cx.make(ui.Text{ .text = lines[0], .style = .{ .size = size, .font = f }, .wrap = false, .ellipsis = true }),
         } })) catch {};
     }
     return cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(24), .child = cx.make(ui.Column{
