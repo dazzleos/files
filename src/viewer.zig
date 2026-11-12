@@ -7,9 +7,11 @@
 
 const std = @import("std");
 const sys = @import("sys");
-const ui = @import("ui");
-const gfx = @import("gfx");
-const font = @import("font");
+const kete = @import("kete");
+const players = @import("players.zig");
+const kete_vc4 = @import("kete_vc4");
+const gfx = kete.gfx;
+const font = kete.font;
 const content = @import("content.zig");
 const decode = @import("decode.zig");
 const video = @import("video");
@@ -19,7 +21,7 @@ const fs = @import("fs.zig");
 const Content = content.Content;
 
 /// What is in `c`, at scale `s`, `width` wide.
-pub fn view(cx: *ui.Context, c: *const Content, width: f32) ui.Widget {
+pub fn view(cx: *kete.BuildContext, c: *const Content, width: f32) kete.Widget {
     if (c.err) |err| return message(cx, switch (err) {
         error.AccessDenied => "You are not allowed to read this file",
         error.NotFound => "This file is not there any more",
@@ -28,9 +30,9 @@ pub fn view(cx: *ui.Context, c: *const Content, width: f32) ui.Widget {
     return switch (c.kind) {
         .empty => message(cx, "This file is empty"),
         .text => |lines| textView(cx, lines),
-        .image => |*img| cx.make(ui.Padding{ .padding = .all(16), .child = cx.make(ui.Center{ .child = cx.make(ui.Image{ .image = &img.image }) }) }),
-        .video => |player| cx.make(ui.VideoPlayer{ .player = player }),
-        .audio => |player| cx.make(ui.AudioPlayer{ .player = player }),
+        .image => |*img| cx.make(kete.Padding{ .padding = .all(16), .child = cx.make(kete.Align{ .child = cx.make(kete.Image{ .source = .{ .image = &img.image } }) }) }),
+        .video => |player| cx.make(players.VideoPlayer{ .player = player }),
+        .audio => |player| cx.make(players.AudioPlayer{ .player = player }),
         .font => |*f| fontView(cx, f),
         .binary => hexView(cx, c.data, width),
     };
@@ -38,7 +40,7 @@ pub fn view(cx: *ui.Context, c: *const Content, width: f32) ui.Widget {
 
 /// What the file holds, in a line: "Text, 120 lines", "PNG image, 640 ×
 /// 480", ...
-pub fn describe(cx: *ui.Context, c: *const Content) []const u8 {
+pub fn describe(cx: *kete.BuildContext, c: *const Content) []const u8 {
     if (c.err != null) return "";
     const first = if (c.truncated) cx.fmt(" (the first {d} MB)", .{content.max_read / (1024 * 1024)}) else "";
     return switch (c.kind) {
@@ -70,8 +72,8 @@ pub fn describe(cx: *ui.Context, c: *const Content) []const u8 {
     };
 }
 
-fn message(cx: *ui.Context, text: []const u8) ui.Widget {
-    return cx.make(ui.Center{ .child = cx.make(ui.Padding{ .padding = .all(24), .child = cx.make(ui.Text{
+fn message(cx: *kete.BuildContext, text: []const u8) kete.Widget {
+    return cx.make(kete.Align{ .child = cx.make(kete.Padding{ .padding = .all(24), .child = cx.make(kete.Text{
         .text = text,
         .style = .{ .size = 20, .color = cx.theme().on_surface_variant },
         .text_align = .center,
@@ -84,17 +86,17 @@ fn message(cx: *ui.Context, text: []const u8) ui.Widget {
 const Lines = struct {
     lines: []const []const u8,
 
-    fn row(l: *const Lines, cx: *ui.Context, i: usize) ui.Widget {
+    fn row(l: *const Lines, cx: *kete.BuildContext, i: usize) kete.Widget {
         // Long lines end in "…" (they are not wrapped: rows are all one
         // height).
-        return cx.make(ui.Text{ .text = l.lines[i], .style = .{ .size = 16 }, .wrap = false, .ellipsis = true });
+        return cx.make(kete.Text{ .text = l.lines[i], .style = .{ .size = 16 }, .wrap = false, .ellipsis = true });
     }
 };
 
-fn textView(cx: *ui.Context, lines: []const []const u8) ui.Widget {
-    const l = cx.ui.arena().create(Lines) catch return cx.make(ui.Empty{});
+fn textView(cx: *kete.BuildContext, lines: []const []const u8) kete.Widget {
+    const l = cx.arena.create(Lines) catch return cx.make(kete.SizedBox.empty);
     l.* = .{ .lines = lines };
-    return cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(16), .child = cx.make(ui.LazyGrid{
+    return cx.make(kete.ScrollView{ .child = cx.make(kete.Padding{ .padding = .all(16), .child = cx.make(kete_vc4.LazyGrid{
         .count = lines.len,
         .cell = .{ .w = std.math.inf(f32), .h = 22 },
         .item = .of(l, Lines.row),
@@ -116,21 +118,21 @@ const emoji_samples = [_][]const u8{
     "👍 👍🏻 👍🏼 👍🏽 👍🏾 👍🏿 🇳🇿 🇬🇧 🇺🇸 🇯🇵",
 };
 
-fn fontView(cx: *ui.Context, f: *const font.Font) ui.Widget {
-    const a = cx.ui.arena();
+fn fontView(cx: *kete.BuildContext, f: *const font.Font) kete.Widget {
+    const a = cx.arena;
     const lines: []const []const u8 = if (f.glyphIndex('A') == 0 and f.glyphIndex(0x1f600) != 0) &emoji_samples else &samples;
-    var rows: std.ArrayList(ui.Widget) = .empty;
-    for (lines) |sample| rows.append(a, cx.make(ui.Text{ .text = sample, .style = .{ .size = 28, .font = f } })) catch {};
+    var rows: std.ArrayList(kete.Widget) = .empty;
+    for (lines) |sample| rows.append(a, cx.make(kete.Text{ .text = sample, .style = .{ .size = 28, .font = f } })) catch {};
     // The first sample at sizes from small to big.
     for ([_]f32{ 12, 18, 24, 36, 48, 72 }) |size| {
-        rows.append(a, cx.make(ui.Column{ .cross_axis_alignment = .stretch, .main_axis_size = .min, .spacing = 2, .children = &.{
-            cx.make(ui.Text{ .text = cx.fmt("{d} pixels", .{size}), .style = .{ .size = 14, .color = cx.theme().on_surface_variant } }),
-            cx.make(ui.Text{ .text = lines[0], .style = .{ .size = size, .font = f }, .wrap = false, .ellipsis = true }),
+        rows.append(a, cx.make(kete.Column{ .cross_axis_alignment = .stretch, .fill = false, .spacing = 2, .children = &.{
+            cx.make(kete.Text{ .text = cx.fmt("{d} pixels", .{size}), .style = .{ .size = 14, .color = cx.theme().on_surface_variant } }),
+            cx.make(kete.Text{ .text = lines[0], .style = .{ .size = size, .font = f }, .wrap = false, .ellipsis = true }),
         } })) catch {};
     }
-    return cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(24), .child = cx.make(ui.Column{
+    return cx.make(kete.ScrollView{ .child = cx.make(kete.Padding{ .padding = .all(24), .child = cx.make(kete.Column{
         .cross_axis_alignment = .stretch,
-        .main_axis_size = .min,
+        .fill = false,
         .spacing = 16,
         .children = rows.items,
     }) }) });
@@ -144,15 +146,15 @@ const Bytes = struct {
     size: f32,
     pitch: Pitch,
 
-    fn row(b: *const Bytes, cx: *ui.Context, i: usize) ui.Widget {
+    fn row(b: *const Bytes, cx: *kete.BuildContext, i: usize) kete.Widget {
         const n = b.pitch.per_row;
         const start = i * n;
         return cx.make(HexRow{ .offset = start, .bytes = b.data[start..@min(start + n, b.data.len)], .size = b.size, .pitch = b.pitch });
     }
 };
 
-fn hexView(cx: *ui.Context, data: []const u8, width: f32) ui.Widget {
-    const b = cx.ui.arena().create(Bytes) catch return cx.make(ui.Empty{});
+fn hexView(cx: *kete.BuildContext, data: []const u8, width: f32) kete.Widget {
+    const b = cx.arena.create(Bytes) catch return cx.make(kete.SizedBox.empty);
     const size = 15;
     const pad = 16;
     // As many bytes a row as fit (beside the scroll bar).
@@ -162,7 +164,7 @@ fn hexView(cx: *ui.Context, data: []const u8, width: f32) ui.Widget {
         if (pitch.width() + 2 * pad + 12 <= width) break;
     }
     b.* = .{ .data = data, .size = size, .pitch = pitch };
-    return cx.make(ui.ScrollView{ .child = cx.make(ui.Padding{ .padding = .all(pad), .child = cx.make(ui.LazyGrid{
+    return cx.make(kete.ScrollView{ .child = cx.make(kete.Padding{ .padding = .all(pad), .child = cx.make(kete_vc4.LazyGrid{
         .count = (data.len + pitch.per_row - 1) / pitch.per_row,
         .cell = .{ .w = std.math.inf(f32), .h = 22 },
         .item = .of(b, Bytes.row),
@@ -214,13 +216,13 @@ pub const HexRow = struct {
     size: f32,
     pitch: Pitch,
 
-    pub fn layout(self: *const HexRow, _: *ui.Node, c: ui.Constraints) ui.Size {
+    pub fn layout(self: *const HexRow, _: *kete.WidgetNode, c: kete.Constraints) kete.Size {
         return c.constrain(.{ .w = self.pitch.width(), .h = self.size * 1.4 });
     }
 
-    pub fn paint(self: *const HexRow, n: *ui.Node, p: *ui.Painter) void {
+    pub fn paint(self: *const HexRow, n: *kete.WidgetNode, p: *kete.Painter) void {
         const f = n.ui.font orelse return;
-        const t = &n.ui.theme;
+        const t = n.theme();
         const style: font.Style = .{ .font = f, .size = self.size };
         const baseline = @round((n.size.h + style.ascent() * 0.75) / 2);
         const pitch = self.pitch;
@@ -237,7 +239,7 @@ pub const HexRow = struct {
     }
 
     /// `c` in the middle of a cell `w` wide at `x`.
-    fn char(_: *const HexRow, p: *ui.Painter, style: font.Style, c: u8, x: f32, w: f32, baseline: f32, color: gfx.Color) void {
+    fn char(_: *const HexRow, p: *kete.Painter, style: font.Style, c: u8, x: f32, w: f32, baseline: f32, color: gfx.Color) void {
         if (c == ' ') return;
         const cw = font.measure(style, &.{c});
         _ = p.text(style.size, @round(x + (w - cw) / 2), baseline, &.{c}, color);
@@ -261,7 +263,7 @@ test "rows of bytes line up, the text after the bytes" {
 
 test "video viewer describes the video and renders transport controls" {
     const fira = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &fira);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &fira);
     defer u.destroy();
 
     var frames = [_]video.Sample{
@@ -293,7 +295,7 @@ test "video viewer describes the video and renders transport controls" {
     const Wrapper = struct {
         content: *const Content,
         desc: *[]const u8,
-        pub fn build(self: *const @This(), cx: *ui.Context) ui.Widget {
+        pub fn build(self: *const @This(), cx: *kete.BuildContext) kete.Widget {
             self.desc.* = describe(cx, self.content);
             return view(cx, self.content, 700);
         }
@@ -303,25 +305,25 @@ test "video viewer describes the video and renders transport controls" {
     try testing.expectEqualStrings("H.264 video, 1280 × 720  ·  0:10", desc);
 
     const Find = struct {
-        fn first(node: *ui.Node, comptime T: type) ?*ui.Node {
+        fn first(node: *kete.WidgetNode, comptime T: type) ?*kete.WidgetNode {
             if (node.widget.is(T)) return node;
             for (node.children.items) |ch| if (first(ch, T)) |n| return n;
             return null;
         }
     };
-    try testing.expect(Find.first(u.root.?, ui.Image) != null);
-    const seek = Find.first(u.root.?, ui.video_player.SeekTrack).?;
+    try testing.expect(Find.first(u.root.?, kete.Image) != null);
+    const seek = Find.first(u.root.?, players.SeekTrack(video.Player)).?;
     const at = seek.position();
-    const click: ui.Point = .{ at[0] + seek.size.w * 0.75, at[1] + seek.size.h * 0.5 };
+    const click: kete.Point = .{ at[0] + seek.size.w * 0.75, at[1] + seek.size.h * 0.5 };
     u.pointerMotion(click);
-    u.pointerButton(click, ui.btn_left, true);
-    u.pointerButton(click, ui.btn_left, false);
+    u.pointerButton(click, .left, true);
+    u.pointerButton(click, .left, false);
     try testing.expectEqual(@as(u64, 5_000_000), player.position_us);
 }
 
 test "audio viewer describes WAV files and renders transport controls" {
     const fira = try font.Font.init(@embedFile("FiraSans-Regular.ttf"));
-    const u = try ui.Ui.create(testing.allocator, &fira);
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &fira);
     defer u.destroy();
 
     var wav_bytes: [44 + 44100 * 4]u8 = @splat(0);
@@ -337,7 +339,7 @@ test "audio viewer describes WAV files and renders transport controls" {
     const Wrapper = struct {
         content: *const Content,
         desc: *[]const u8,
-        pub fn build(self: *const @This(), cx: *ui.Context) ui.Widget {
+        pub fn build(self: *const @This(), cx: *kete.BuildContext) kete.Widget {
             self.desc.* = describe(cx, self.content);
             return view(cx, self.content, 700);
         }
@@ -347,17 +349,17 @@ test "audio viewer describes WAV files and renders transport controls" {
     try testing.expectEqualStrings("WAV audio, 44.1 kHz stereo  ·  0:10", desc);
 
     const Find = struct {
-        fn first(node: *ui.Node, comptime T: type) ?*ui.Node {
+        fn first(node: *kete.WidgetNode, comptime T: type) ?*kete.WidgetNode {
             if (node.widget.is(T)) return node;
             for (node.children.items) |ch| if (first(ch, T)) |n| return n;
             return null;
         }
     };
-    const seek = Find.first(u.root.?, ui.audio_player.SeekTrack).?;
+    const seek = Find.first(u.root.?, players.SeekTrack(audio.Player)).?;
     const at = seek.position();
-    const click: ui.Point = .{ at[0] + seek.size.w * 0.5, at[1] + seek.size.h * 0.5 };
+    const click: kete.Point = .{ at[0] + seek.size.w * 0.5, at[1] + seek.size.h * 0.5 };
     u.pointerMotion(click);
-    u.pointerButton(click, ui.btn_left, true);
-    u.pointerButton(click, ui.btn_left, false);
+    u.pointerButton(click, .left, true);
+    u.pointerButton(click, .left, false);
     try testing.expectEqual(@as(u64, 5000), player.positionMs());
 }

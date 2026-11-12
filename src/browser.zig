@@ -114,6 +114,9 @@ pub const Browser = struct {
     /// What the window is asking, and why the last change asked for
     /// could not be made (shown with it).
     prompt: Prompt = .none,
+    /// Control is held (a drop copies rather than moves): the window's
+    /// keys say (main.zig).
+    ctrl_held: bool = false,
     failure: ?[]const u8 = null,
     /// The new folder's name, as it is typed.
     name_buf: [255]u8 = undefined,

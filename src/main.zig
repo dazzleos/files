@@ -2,19 +2,18 @@
 //! root. The tree of folders is on the left and the open folder's
 //! contents, as a grid of icons, on the right (see view.zig); folders are
 //! read when they are opened (see fs.zig and browser.zig). The window is
-//! built with the `ui` toolkit, and only what changed is drawn again.
+//! built with kete, and only what changed is drawn again.
 //!
-//!     dazzle-files [font.ttf]
+//!     dazzle-files
 //!
 //! It runs until it is stopped or its window is closed.
 
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
-const locale = @import("locale");
-const font = @import("font");
 const app = @import("app");
-const ui = @import("ui");
+const kete = @import("kete");
+const kete_vc4 = @import("kete_vc4");
 const fs = @import("fs.zig");
 const browser_mod = @import("browser.zig");
 const view = @import("view.zig");
@@ -37,99 +36,122 @@ const key_escape = 1;
 /// How often the progress of a copy is drawn.
 const progress_ns = 250 * std.time.ns_per_ms;
 
-pub fn main(init: std.process.Init.Minimal) u8 {
+pub fn main(init: std.process.Init) u8 {
     sys.logToKmsgIfStderr();
-    var args = init.args.iterate();
-    _ = args.skip();
-    var font_buf: [512]u8 = undefined;
-    const font_path: [*:0]const u8 = args.next() orelse sys.fontFile(&font_buf, font.default_font_file);
-    run(init, font_path) catch |err| {
+    run(init) catch |err| {
         print(sys.log_error ++ "dazzle-files: error: {s}\n", .{@errorName(err)});
         return 1;
     };
     return 0;
 }
 
-fn run(init: std.process.Init.Minimal, font_path: [*:0]const u8) !void {
-    // The language chosen (in setup, or Settings).
-    locale.current = locale.load().language;
+/// The window's root: the folders and the file open, as they are now.
+const Root = struct {
+    browser: *browser_mod.Browser,
+
+    pub fn build(r: *const Root, cx: *kete.BuildContext) kete.Widget {
+        const width: f32 = if (cx.window()) |w| @floatFromInt(w.size()[0]) else 1280;
+        return cx.make(view.Files{ .browser = r.browser, .width = width, .now = realNow() });
+    }
+};
+
+/// The window's own keys, whatever has the keyboard (unless a text field
+/// has it, for those that type).
+const Keys = struct {
+    browser: *browser_mod.Browser,
+    window: ?*kete.App.Window = null,
+    /// A key did something: the window is drawn again.
+    pressed: bool = false,
+
+    fn key(k: *Keys, press: kete_vc4.KeyPress) void {
+        const browser = k.browser;
+        browser.ctrl_held = press.ctrl;
+        if (!press.pressed) return;
+        const typing = if (k.window) |w| w.ui.focused != null else false;
+        const now = sys.nowNs();
+        switch (press.code) {
+            key_backspace => if (!typing) browser.request(.up),
+            key_delete => if (!typing and browser.prompt == .none) browser.request(.{ .prompt = .delete }),
+            key_escape => if (browser.prompt != .none) browser.request(.{ .prompt = .none }),
+            key_c => if (!typing and press.ctrl) browser.request(.copy),
+            key_x => if (!typing and press.ctrl) browser.request(.cut),
+            key_v => if (!typing and press.ctrl) browser.request(.paste),
+            key_space => if (!typing and browser.prompt == .none) if (browser.file) |*f| switch (f.kind) {
+                .video => |player| player.togglePlay(now),
+                .audio => |player| player.togglePlay(),
+                else => {},
+            },
+            key_left => if (!typing and browser.prompt == .none) if (browser.file) |*f| switch (f.kind) {
+                .video => |player| player.seekTo(player.position_us -| 5_000_000, now),
+                .audio => |player| player.seekRelativeMs(-5000),
+                else => {},
+            },
+            key_right => if (!typing and browser.prompt == .none) if (browser.file) |*f| switch (f.kind) {
+                .video => |player| player.seekTo(player.position_us + 5_000_000, now),
+                .audio => |player| player.seekRelativeMs(5000),
+                else => {},
+            },
+            else => {},
+        }
+        k.pressed = true;
+    }
+};
+
+fn run(init: std.process.Init) !void {
     const gpa = std.heap.page_allocator;
-    const a = try ui.App.open(gpa, init.environ, .{
-        .title = "Files",
-        .app_id = "dazzle-files",
-        .size = view.open_size,
-        .min_size = view.min_size,
-        .font_path = font_path,
-    });
-    defer a.close();
+    var host: kete_vc4.Host = undefined;
+    try host.init(gpa, init.io, init.minimal.environ, .{ .app_id = "dazzle-files" });
+    defer host.deinit();
 
     // Apps it starts (the text editor) find the compositor as it did.
     var child_env: app.ChildEnv = undefined;
-    browser_mod.app_env = child_env.init(init.environ, "/");
+    browser_mod.app_env = child_env.init(init.minimal.environ, "/");
 
     // The user's files, on the SD card.
     var browser = try browser_mod.Browser.init(gpa, sys.system.user_dir);
     defer browser.deinit();
     // Watch the open folder, the folders open in the tree, and /media.
-    a.win.wake_fd = browser.watch_fd;
+    if (browser.watch_fd) |fd| host.wakeOn(fd, true);
+
+    var keys: Keys = .{ .browser = &browser };
+    host.display.on_key = .of(&keys, Keys.key);
+    const root: Root = .{ .browser = &browser };
+    const window = try host.app.openWindow(.{
+        .title = "Files",
+        .root = .of(&root),
+        .size = view.open_size,
+        .min_size = view.min_size,
+        .on_close_request = .close,
+    });
+    keys.window = window;
 
     var last_progress: u64 = 0;
-    while (try a.step(browser.videoWakeNs() orelse if (browser.copying()) progress_ns else 60 * std.time.ns_per_s)) {
-        if (a.suspended_changed and !a.suspended) {
+    var suspended = false;
+    while (try host.step(browser.videoWakeNs() orelse if (browser.copying()) progress_ns else 60 * std.time.ns_per_s)) {
+        if (window.suspended != suspended) {
+            suspended = window.suspended;
             // An editor may have been installed or removed meanwhile.
-            browser.findEditor();
+            if (!suspended) browser.findEditor();
         }
         const now = sys.nowNs();
-        for (a.win.takeInput()) |e| switch (e) {
-            .key => |k| {
-                const typing = a.ui.focused != null;
-                a.ui.keyEvent(k.code, k.pressed);
-                if (k.pressed) switch (k.code) {
-                    key_backspace => if (!typing) browser.request(.up),
-                    key_delete => if (!typing and browser.prompt == .none) browser.request(.{ .prompt = .delete }),
-                    key_escape => if (browser.prompt != .none) browser.request(.{ .prompt = .none }),
-                    key_c => if (!typing and a.ui.ctrl > 0) browser.request(.copy),
-                    key_x => if (!typing and a.ui.ctrl > 0) browser.request(.cut),
-                    key_v => if (!typing and a.ui.ctrl > 0) browser.request(.paste),
-                    key_space => if (!typing and browser.prompt == .none) if (browser.file) |*f| switch (f.kind) {
-                        .video => |player| player.togglePlay(now),
-                        .audio => |player| player.togglePlay(),
-                        else => {},
-                    },
-                    key_left => if (!typing and browser.prompt == .none) if (browser.file) |*f| switch (f.kind) {
-                        .video => |player| player.seekTo(player.position_us -| 5_000_000, now),
-                        .audio => |player| player.seekRelativeMs(-5000),
-                        else => {},
-                    },
-                    key_right => if (!typing and browser.prompt == .none) if (browser.file) |*f| switch (f.kind) {
-                        .video => |player| player.seekTo(player.position_us + 5_000_000, now),
-                        .audio => |player| player.seekRelativeMs(5000),
-                        else => {},
-                    },
-                    else => {},
-                };
-                a.dirty = true;
-            },
-            else => a.ui.handleInput(e),
-        };
+        if (keys.pressed) {
+            keys.pressed = false;
+            host.redraw();
+        }
         // What the clicks asked for, now that no widget is handling them.
-        if (browser.apply()) a.dirty = true;
-        if (browser.checkWatches()) a.dirty = true;
-        if (browser.stepVideo(a.win.nextPresentationNs(now))) a.dirty = true;
+        if (browser.apply()) host.redraw();
+        if (browser.checkWatches()) host.redraw();
+        const shown_at = if (host.display.window) |*w| w.nextPresentationNs(now) else now;
+        if (browser.stepVideo(shown_at)) host.redraw();
 
         // Copying (on its own thread): the window is drawn again, to say
         // how far it has got, a few times a second, and when it is done.
         if (browser.copying()) {
             if (!browser.poll() or now >= last_progress + progress_ns) {
                 last_progress = now;
-                a.dirty = true;
+                host.redraw();
             }
         }
-        try a.draw(now, view.Files{
-            .browser = &browser,
-            .width = @floatFromInt(a.width),
-            .now = realNow(),
-        });
     }
 }
 
