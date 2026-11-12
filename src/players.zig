@@ -1,7 +1,7 @@
 //! Playing a sound or a video in the viewer, as kete widgets: what plays
 //! (a disc with the file's name and format, or the video's picture) above
 //! a bar with Play or Pause, a seek bar and the time, as Dazzle's own
-//! toolkit had them.
+//! toolkit (before kete) had them.
 
 const std = @import("std");
 const sys = @import("sys");
