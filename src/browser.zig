@@ -544,7 +544,7 @@ pub const Browser = struct {
 
     fn openInEditor(b: *Browser, name: []const u8) void {
         var buf: [4096]u8 = undefined;
-        const path = std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ b.path, name }) catch return;
+        const path = std.mem.printSentinel(&buf, "{s}/{s}", .{ b.path, name }, 0) catch return;
         if (!b.launcher(b.editor().?, path)) b.say("The text editor could not be started", .{});
     }
 
@@ -764,7 +764,7 @@ pub const Browser = struct {
     fn addWatch(b: *Browser, path: []const u8) void {
         const fd = b.watch_fd orelse return;
         var buf: [4096]u8 = undefined;
-        const path_z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return;
+        const path_z = std.mem.printSentinel(&buf, "{s}", .{path}, 0) catch return;
         const rc = linux.inotify_add_watch(fd, path_z, watch_mask | linux.IN.ONLYDIR);
         if (linux.errno(rc) != .SUCCESS) return;
         const wd: i32 = @intCast(rc);
@@ -929,7 +929,7 @@ pub const Browser = struct {
 
 fn folderExists(path: []const u8) bool {
     var buf: [4096]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return false;
+    const z = std.mem.printSentinel(&buf, "{s}", .{path}, 0) catch return false;
     var stx: linux.Statx = undefined;
     if (linux.errno(linux.statx(linux.AT.FDCWD, z, 0, .{ .TYPE = true }, &stx)) != .SUCCESS) return false;
     return stx.mode & linux.S.IFMT == linux.S.IFDIR;
@@ -1032,7 +1032,7 @@ test "the newest first, and the item picked stays picked; and the list" {
     // b-file older than c-tool.
     var z: [128]u8 = undefined;
     for ([_]struct { []const u8, isize }{ .{ "b-file", 1_000_000_000 }, .{ "c-tool", 2_000_000_000 } }) |f| {
-        try sys.setFileTimes(std.os.linux.AT.FDCWD, try std.fmt.bufPrintZ(&z, "{s}/{s}", .{ t.path, f[0] }), f[1], 0);
+        try sys.setFileTimes(std.os.linux.AT.FDCWD, try std.mem.printSentinel(&z, "{s}/{s}", .{ t.path, f[0] }, 0), f[1], 0);
     }
     var b = try Browser.init(testing.allocator, t.path);
     defer b.deinit();
@@ -1086,11 +1086,11 @@ test "text files: made, and opened in the editor, only if there is one" {
 
     // An editor installed (an app that says it opens text).
     var buf: [256]u8 = undefined;
-    const apps = try std.fmt.bufPrintZ(&buf, "{s}/apps", .{t.path});
+    const apps = try std.mem.printSentinel(&buf, "{s}/apps", .{t.path}, 0);
     try fs.makeFolder(t.path, "apps");
     try fs.makeFolder(apps, "ed");
     var hbuf: [256]u8 = undefined;
-    try sys.files.writeNew(try std.fmt.bufPrintZ(&hbuf, "{s}/ed/ed.handles", .{apps}), "text/plain\n");
+    try sys.files.writeNew(try std.mem.printSentinel(&hbuf, "{s}/ed/ed.handles", .{apps}, 0), "text/plain\n");
     b.apps_dir = apps;
     b.findEditor();
     try testing.expect(std.mem.endsWith(u8, b.editor().?, "/ed/ed"));
@@ -1224,12 +1224,12 @@ test "USB drives: opened like the user's files, ejected, and gone" {
     defer t.deinit();
     // A folder of its own stands for /media, with a drive in it.
     var buf: [128]u8 = undefined;
-    const media = try std.fmt.bufPrintZ(&buf, "{s}-media", .{t.path});
+    const media = try std.mem.printSentinel(&buf, "{s}-media", .{t.path}, 0);
     _ = std.os.linux.mkdir(media, 0o755);
     defer sys.files.removeTree(media);
     try fs.makeFolder(media, "STICK");
     var photo_buf: [160]u8 = undefined;
-    try sys.files.writeNew(try std.fmt.bufPrintZ(&photo_buf, "{s}/STICK/photo", .{media}), "jpeg");
+    try sys.files.writeNew(try std.mem.printSentinel(&photo_buf, "{s}/STICK/photo", .{media}, 0), "jpeg");
     var b = try Browser.init(testing.allocator, t.path);
     defer b.deinit();
     b.media_dir = media;
@@ -1365,7 +1365,7 @@ test "cancelling a copy" {
     var t: fs.TestTree = .{};
     try t.init();
     defer t.deinit();
-    try t.write("big", "z" ** (1024 * 1024), 0o644);
+    try t.write("big", &@as([1024 * 1024]u8, @splat('z')), 0o644);
     copier.test_chunk_delay_ms = 20;
     defer copier.test_chunk_delay_ms = 0;
     var b = try Browser.init(testing.allocator, t.path);

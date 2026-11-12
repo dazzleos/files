@@ -758,7 +758,7 @@ const Disclosure = struct {
 /// What a USB drive holds: "USB drive · 1.2 GB free of 16.0 GB".
 fn driveSpace(cx: *ui.Context, path: []const u8) []const u8 {
     var z: [4096]u8 = undefined;
-    const space = sys.diskSpace(std.fmt.bufPrintZ(&z, "{s}", .{path}) catch return "USB drive") orelse return "USB drive";
+    const space = sys.diskSpace(std.mem.printSentinel(&z, "{s}", .{path}, 0) catch return "USB drive") orelse return "USB drive";
     var free_buf: [32]u8 = undefined;
     var total_buf: [32]u8 = undefined;
     return cx.fmt("USB drive  \u{b7}  {s} free of {s}", .{ fs.formatSize(&free_buf, space.free), fs.formatSize(&total_buf, space.total) });
@@ -1321,11 +1321,11 @@ test "New text file and Edit: shown only with an editor, and Edit only for text"
 
     // An editor is installed.
     var buf: [256]u8 = undefined;
-    const apps = try std.fmt.bufPrintZ(&buf, "{s}/apps", .{t.path});
+    const apps = try std.mem.printSentinel(&buf, "{s}/apps", .{t.path}, 0);
     try fs.makeFolder(t.path, "apps");
     try fs.makeFolder(apps, "ed");
     var hbuf: [256]u8 = undefined;
-    try sys.files.writeNew(try std.fmt.bufPrintZ(&hbuf, "{s}/ed/ed.handles", .{apps}), "text/plain\n");
+    try sys.files.writeNew(try std.mem.printSentinel(&hbuf, "{s}/ed/ed.handles", .{apps}, 0), "text/plain\n");
     b.apps_dir = apps;
     b.findEditor();
     Frame(u, &b, &n);
@@ -1355,7 +1355,7 @@ test "USB drives in the tree, with what they hold, and ejecting them" {
     try t.init();
     defer t.deinit();
     var buf: [128]u8 = undefined;
-    const media = try std.fmt.bufPrintZ(&buf, "{s}-media", .{t.path});
+    const media = try std.mem.printSentinel(&buf, "{s}-media", .{t.path}, 0);
     _ = std.os.linux.mkdir(media, 0o755);
     defer sys.files.removeTree(media);
     try fs.makeFolder(media, "HOLIDAY");
@@ -1496,7 +1496,7 @@ test "copying and pasting from the menu, and dragging onto folders" {
     l.deinit();
 
     // While copying, the bottom says how far it has got, at every size.
-    try t.write("big", "z" ** (1024 * 1024), 0o644);
+    try t.write("big", &@as([1024 * 1024]u8, @splat('z')), 0o644);
     b.request(.{ .open = t.path });
     _ = b.apply();
     const big = for (b.listing.entries, 0..) |e, i| {

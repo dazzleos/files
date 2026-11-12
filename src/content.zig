@@ -60,7 +60,7 @@ pub const Content = struct {
 
     fn readInto(c: *Content, path: []const u8) sys.Error!void {
         const a = c.arena.allocator();
-        const path_z = a.dupeZ(u8, path) catch return error.OutOfMemory;
+        const path_z = a.dupeSentinel(u8, path, 0) catch return error.OutOfMemory;
         // Not waiting for files that would (in /proc, say).
         const fd = try sys.open(path_z, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true });
         var keep_fd = false;
@@ -177,7 +177,7 @@ const testing = std.testing;
 
 fn writeFile(path: []const u8, data: []const u8) !void {
     var z: [128]u8 = undefined;
-    const fd = try sys.open(try std.fmt.bufPrintZ(&z, "{s}", .{path}), .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true });
+    const fd = try sys.open(try std.mem.printSentinel(&z, "{s}", .{path}, 0), .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true });
     defer sys.close(fd);
     _ = linux.fchmod(fd, 0o644);
     _ = linux.write(fd, data.ptr, data.len);
@@ -188,7 +188,7 @@ test "files are told apart by what they hold" {
     var path_buf: [64]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "/tmp/dazzle-content-test-{d}", .{linux.getpid()});
     var z: [64]u8 = undefined;
-    defer _ = linux.unlink(std.fmt.bufPrintZ(&z, "{s}", .{path}) catch unreachable);
+    defer _ = linux.unlink(std.mem.printSentinel(&z, "{s}", .{path}, 0) catch unreachable);
 
     try writeFile(path, "first\r\n\tindented\ncafé\n");
     var text = Content.read(gpa, path);

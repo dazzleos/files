@@ -87,8 +87,8 @@ pub const Copier = struct {
             defer gpa.free(dest);
             var from_buf: [4096]u8 = undefined;
             var to_buf: [4096]u8 = undefined;
-            const from = std.fmt.bufPrintZ(&from_buf, "{s}", .{source}) catch return error.Unexpected;
-            const to = std.fmt.bufPrintZ(&to_buf, "{s}", .{dest}) catch return error.Unexpected;
+            const from = std.mem.printSentinel(&from_buf, "{s}", .{source}, 0) catch return error.Unexpected;
+            const to = std.mem.printSentinel(&to_buf, "{s}", .{dest}, 0) catch return error.Unexpected;
             switch (linux.errno(linux.rename(from, to))) {
                 .SUCCESS => {
                     c.finish();
@@ -197,8 +197,8 @@ pub const Copier = struct {
         const st = stat(from) orelse return if (top) c.fail(error.NotFound) else c.skip();
         var to_buf: [4096]u8 = undefined;
         var from_buf: [4096]u8 = undefined;
-        const to_z = std.fmt.bufPrintZ(&to_buf, "{s}", .{to}) catch return c.skip();
-        const from_z = std.fmt.bufPrintZ(&from_buf, "{s}", .{from}) catch return c.skip();
+        const to_z = std.mem.printSentinel(&to_buf, "{s}", .{to}, 0) catch return c.skip();
+        const from_z = std.mem.printSentinel(&from_buf, "{s}", .{from}, 0) catch return c.skip();
         switch (st.kind) {
             .folder => {
                 switch (linux.errno(linux.mkdir(to_z, st.mode | 0o700))) {
@@ -285,7 +285,7 @@ const Stat = struct {
 
 fn stat(path: []const u8) ?Stat {
     var buf: [4096]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return null;
+    const z = std.mem.printSentinel(&buf, "{s}", .{path}, 0) catch return null;
     var stx: linux.Statx = undefined;
     if (linux.errno(linux.statx(linux.AT.FDCWD, z, linux.AT.SYMLINK_NOFOLLOW, .{ .TYPE = true, .MODE = true, .SIZE = true, .MTIME = true }, &stx)) != .SUCCESS) return null;
     const kind: Kind = switch (stx.mode & linux.S.IFMT) {
@@ -300,7 +300,7 @@ fn stat(path: []const u8) ?Stat {
 /// The names in the folder at `path` (in `a`).
 fn list(a: std.mem.Allocator, path: []const u8) ![]const []const u8 {
     var buf: [4096]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return error.NameTooLong;
+    const z = std.mem.printSentinel(&buf, "{s}", .{path}, 0) catch return error.NameTooLong;
     const dir = try sys.open(z, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true });
     defer sys.close(dir);
     var names: std.ArrayList([]const u8) = .empty;
@@ -356,7 +356,7 @@ pub fn sameFilesystem(a: []const u8, b: []const u8) bool {
 
 fn device(path: []const u8) ?[2]u32 {
     var buf: [4096]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return null;
+    const z = std.mem.printSentinel(&buf, "{s}", .{path}, 0) catch return null;
     var stx: linux.Statx = undefined;
     if (linux.errno(linux.statx(linux.AT.FDCWD, z, linux.AT.SYMLINK_NOFOLLOW, .{ .TYPE = true }, &stx)) != .SUCCESS) return null;
     return .{ stx.dev_major, stx.dev_minor };
@@ -373,7 +373,7 @@ const testing = std.testing;
 
 fn readAll(buf: []u8, path: []const u8) ![]const u8 {
     var z: [256]u8 = undefined;
-    return sys.readFile(try std.fmt.bufPrintZ(&z, "{s}", .{path}), buf) orelse error.NotFound;
+    return sys.readFile(try std.mem.printSentinel(&z, "{s}", .{path}, 0), buf) orelse error.NotFound;
 }
 
 test "copying a folder with what is in it, under a free name" {
@@ -383,10 +383,10 @@ test "copying a folder with what is in it, under a free name" {
     var buf: [256]u8 = undefined;
     const folder = try std.fmt.bufPrint(&buf, "{s}/A-folder", .{t.path});
     try fs.makeFolder(folder, "inner");
-    try t.write("A-folder/inner/big", "x" ** (chunk + 10), 0o644);
+    try t.write("A-folder/inner/big", &@as([chunk + 10]u8, @splat('x')), 0o644);
     try t.write("A-folder/run", "#!", 0o755);
     var lbuf: [256]u8 = undefined;
-    _ = linux.symlink("run", try std.fmt.bufPrintZ(&lbuf, "{s}/A-folder/to-run", .{t.path}));
+    _ = linux.symlink("run", try std.mem.printSentinel(&lbuf, "{s}/A-folder/to-run", .{t.path}, 0));
 
     // Into the same folder: "A-folder (copy)".
     const c = try Copier.start(testing.allocator, folder, t.path, false);
@@ -404,10 +404,10 @@ test "copying a folder with what is in it, under a free name" {
     var pbuf: [256]u8 = undefined;
     try testing.expectEqual(@as(usize, chunk + 10), (try readAll(&out, try std.fmt.bufPrint(&pbuf, "{s}/A-folder (copy)/inner/big", .{t.path}))).len);
     var link: [64]u8 = undefined;
-    const n = linux.readlink(try std.fmt.bufPrintZ(&pbuf, "{s}/A-folder (copy)/to-run", .{t.path}), &link, link.len);
+    const n = linux.readlink(try std.mem.printSentinel(&pbuf, "{s}/A-folder (copy)/to-run", .{t.path}, 0), &link, link.len);
     try testing.expectEqualStrings("run", link[0..n]);
     var stx: linux.Statx = undefined;
-    _ = linux.statx(linux.AT.FDCWD, try std.fmt.bufPrintZ(&pbuf, "{s}/A-folder (copy)/run", .{t.path}), 0, .{ .MODE = true }, &stx);
+    _ = linux.statx(linux.AT.FDCWD, try std.mem.printSentinel(&pbuf, "{s}/A-folder (copy)/run", .{t.path}, 0), 0, .{ .MODE = true }, &stx);
     try testing.expectEqual(@as(u32, 0o755), stx.mode & 0o777);
 
     // Again: "(copy 2)". And not into itself.
@@ -435,7 +435,7 @@ test "moving within a filesystem renames; stopping leaves no part of a file" {
     try testing.expectEqualStrings("hello", try readAll(&out, try std.fmt.bufPrint(&pbuf, "{s}/b-file", .{into})));
     try testing.expect(stat(file) == null);
 
-    try t.write("big", "y" ** (8 * chunk), 0o644);
+    try t.write("big", &@as([8 * chunk]u8, @splat('y')), 0o644);
     const big = try std.fmt.bufPrint(&buf, "{s}/big", .{t.path});
     test_chunk_delay_ms = 20;
     defer test_chunk_delay_ms = 0;

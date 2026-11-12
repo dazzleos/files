@@ -78,7 +78,7 @@ pub const Listing = struct {
 
     fn readInto(l: *Listing, path: []const u8) sys.Error!void {
         const a = l.arena.allocator();
-        const path_z = a.dupeZ(u8, path) catch return error.OutOfMemory;
+        const path_z = a.dupeSentinel(u8, path, 0) catch return error.OutOfMemory;
         const dir = try sys.open(path_z, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true });
         defer sys.close(dir);
         var entries: std.ArrayList(Entry) = .empty;
@@ -148,7 +148,7 @@ fn before(order: Order, a: Entry, b: Entry) bool {
 /// Whether things can be made in the folder at `path`.
 pub fn writable(path: []const u8) bool {
     var buf: [4096]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return false;
+    const z = std.mem.printSentinel(&buf, "{s}", .{path}, 0) catch return false;
     return linux.access(z, linux.W_OK) == 0;
 }
 
@@ -257,7 +257,7 @@ pub fn validName(name: []const u8) bool {
 pub fn makeFolder(dir: []const u8, name: []const u8) ChangeError!void {
     if (!validName(name)) return error.BadName;
     var buf: [4096]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ dir, name }) catch return error.BadName;
+    const path = std.mem.printSentinel(&buf, "{s}/{s}", .{ dir, name }, 0) catch return error.BadName;
     return switch (linux.errno(linux.mkdir(path, 0o755))) {
         .SUCCESS => {},
         .EXIST => error.Exists,
@@ -272,7 +272,7 @@ pub fn makeFolder(dir: []const u8, name: []const u8) ChangeError!void {
 pub fn makeFile(dir: []const u8, name: []const u8) ChangeError!void {
     if (!validName(name)) return error.BadName;
     var buf: [4096]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ dir, name }) catch return error.BadName;
+    const path = std.mem.printSentinel(&buf, "{s}/{s}", .{ dir, name }, 0) catch return error.BadName;
     const rc = linux.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true }, 0o644);
     return switch (linux.errno(rc)) {
         .SUCCESS => sys.close(@intCast(rc)),
@@ -306,7 +306,7 @@ pub fn isTextFile(dir: []const u8, name: []const u8) bool {
     if (isTextName(name)) return true;
     if (std.mem.lastIndexOfScalar(u8, name, '.') != null) return false;
     var buf: [4096]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ dir, name }) catch return false;
+    const path = std.mem.printSentinel(&buf, "{s}/{s}", .{ dir, name }, 0) catch return false;
     const fd = sys.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }) catch return false;
     defer sys.close(fd);
     var head: [512]u8 = undefined;
@@ -325,7 +325,7 @@ pub fn isTextFile(dir: []const u8, name: []const u8) bool {
 /// everything in it. A link is deleted itself, not what it leads to.
 pub fn delete(dir: []const u8, name: []const u8) ChangeError!void {
     var buf: [4096]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ dir, name }) catch return error.NotFound;
+    const path = std.mem.printSentinel(&buf, "{s}/{s}", .{ dir, name }, 0) catch return error.NotFound;
     var stx: linux.Statx = undefined;
     switch (linux.errno(linux.statx(linux.AT.FDCWD, path, linux.AT.SYMLINK_NOFOLLOW, .{ .TYPE = true }, &stx))) {
         .SUCCESS => {},
@@ -353,7 +353,7 @@ pub fn delete(dir: []const u8, name: []const u8) ChangeError!void {
 /// saying what deleting it deletes; null if it cannot be read.
 pub fn countItems(path: []const u8) ?usize {
     var buf: [4096]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return null;
+    const z = std.mem.printSentinel(&buf, "{s}", .{path}, 0) catch return null;
     const dir = sys.open(z, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }) catch return null;
     defer sys.close(dir);
     var count: usize = 0;
@@ -456,18 +456,18 @@ pub const TestTree = struct {
     pub fn init(t: *TestTree) !void {
         t.path = try std.fmt.bufPrint(&t.path_buf, "/tmp/dazzle-files-test-{d}", .{linux.getpid()});
         var z: [128]u8 = undefined;
-        _ = linux.mkdir(try std.fmt.bufPrintZ(&z, "{s}", .{t.path}), 0o755);
-        _ = linux.mkdir(try std.fmt.bufPrintZ(&z, "{s}/A-folder", .{t.path}), 0o755);
+        _ = linux.mkdir(try std.mem.printSentinel(&z, "{s}", .{t.path}, 0), 0o755);
+        _ = linux.mkdir(try std.mem.printSentinel(&z, "{s}/A-folder", .{t.path}, 0), 0o755);
         try t.write("b-file", "hello", 0o644);
         try t.write("c-tool", "#!/bin/sh\n", 0o755);
         try t.write(".hidden", "", 0o644);
-        _ = linux.symlink("A-folder", try std.fmt.bufPrintZ(&z, "{s}/z-link", .{t.path}));
-        _ = linux.symlink("nowhere", try std.fmt.bufPrintZ(&z, "{s}/broken", .{t.path}));
+        _ = linux.symlink("A-folder", try std.mem.printSentinel(&z, "{s}/z-link", .{t.path}, 0));
+        _ = linux.symlink("nowhere", try std.mem.printSentinel(&z, "{s}/broken", .{t.path}, 0));
     }
 
     pub fn write(t: *TestTree, name: []const u8, data: []const u8, mode: linux.mode_t) !void {
         var z: [128]u8 = undefined;
-        const fd = try sys.open(try std.fmt.bufPrintZ(&z, "{s}/{s}", .{ t.path, name }), .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true });
+        const fd = try sys.open(try std.mem.printSentinel(&z, "{s}/{s}", .{ t.path, name }, 0), .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true });
         defer sys.close(fd);
         _ = linux.fchmod(fd, mode);
         _ = linux.write(fd, data.ptr, data.len);
@@ -475,7 +475,7 @@ pub const TestTree = struct {
 
     pub fn deinit(t: *TestTree) void {
         var z: [128]u8 = undefined;
-        sys.files.removeTree(std.fmt.bufPrintZ(&z, "{s}", .{t.path}) catch return);
+        sys.files.removeTree(std.mem.printSentinel(&z, "{s}", .{t.path}, 0) catch return);
     }
 };
 
