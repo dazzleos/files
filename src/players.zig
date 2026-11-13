@@ -1,7 +1,6 @@
 //! Playing a sound or a video in the viewer, as kete widgets: what plays
 //! (a disc with the file's name and format, or the video's picture) above
-//! a bar with Play or Pause, a seek bar and the time, as Dazzle's own
-//! toolkit (before kete) had them.
+//! a bar with Play or Pause, a seek bar (kete's `Slider`) and the time.
 
 const std = @import("std");
 const sys = @import("sys");
@@ -11,11 +10,6 @@ const kete = @import("kete");
 
 const Context = kete.BuildContext;
 const Widget = kete.Widget;
-const Node = kete.WidgetNode;
-const Event = kete.Event;
-const Painter = kete.Painter;
-const Constraints = kete.Constraints;
-const Size = kete.Size;
 
 /// A sound playing: its disc, name and format, and the transport bar.
 pub const AudioPlayer = struct {
@@ -81,7 +75,7 @@ pub const AudioPlayer = struct {
                 .label = label,
                 .icon = play_icon,
                 .on_press = .of(state, State.onTogglePlay),
-            }), cx.make(SeekTrack(audio.Player){ .player = p }), cx.fmt("{s} / {s}", .{ pos_str, dur_str })),
+            }), seekBar(cx, p), cx.fmt("{s} / {s}", .{ pos_str, dur_str })),
         }) });
     }
 };
@@ -144,7 +138,7 @@ pub const VideoPlayer = struct {
                 .label = label,
                 .icon = ic,
                 .on_press = if (player.decoder != null and act != null) .of(act.?, Act.toggle) else null,
-            }), cx.make(SeekTrack(video.Player){ .player = player }), cx.fmt("{s} / {s}", .{ pos_str, dur_str })),
+            }), seekBar(cx, player), cx.fmt("{s} / {s}", .{ pos_str, dur_str })),
         }) });
     }
 };
@@ -191,74 +185,19 @@ fn seekable(p: anytype) bool {
     };
 }
 
-/// A player's progress, as a track with a thumb: pressing or dragging it
-/// seeks.
-pub fn SeekTrack(comptime Player: type) type {
-    return struct {
-        player: *Player,
-
-        const Self = @This();
-
-        pub const State = struct {
-            dragging: bool = false,
-        };
-
-        pub fn layout(_: *const Self, _: *Node, c: Constraints) Size {
-            return c.constrain(.{ .w = c.max_w, .h = 32 });
-        }
-
-        pub fn paint(self: *const Self, n: *Node, p: *Painter) void {
-            const t = n.theme();
-            const c = p.canvas();
-            const pad: f32 = 8;
-            const track_w = @max(n.size.w - pad * 2, 0);
-            const track_h: f32 = 6;
-            const track_y = @round((n.size.h - track_h) / 2);
-            const fill_w = track_w * progressOf(self.player);
-
-            c.fillRoundedRect(.{ .x = pad, .y = track_y, .w = track_w, .h = track_h }, .all(3), t.surface_container_highest);
-            if (fill_w > 0) c.fillRoundedRect(.{ .x = pad, .y = track_y, .w = fill_w, .h = track_h }, .all(3), t.primary);
-            const thumb_r: f32 = 7;
-            const thumb_x = pad + fill_w - thumb_r;
-            const thumb_y = @round(n.size.h / 2) - thumb_r;
-            c.fillRoundedRect(.{ .x = thumb_x, .y = thumb_y, .w = thumb_r * 2, .h = thumb_r * 2 }, .all(thumb_r), if (seekable(self.player)) t.primary else t.outline);
-        }
-
-        pub fn cursor(self: *const Self, n: *Node, _: kete.Point) ?kete.PointerCursor {
-            if (!seekable(self.player)) return null;
-            return if (n.state(State).dragging) .grabbing else .pointer;
-        }
-
-        pub fn event(self: *const Self, n: *Node, e: Event) bool {
-            if (!seekable(self.player)) return false;
-            const st = n.state(State);
-            switch (e) {
-                .press => |pr| {
-                    if (pr.button != .left) return false;
-                    st.dragging = true;
-                    self.seekAt(n, pr.pos[0]);
-                    return true;
-                },
-                .motion => |pos| if (st.dragging) {
-                    self.seekAt(n, pos[0]);
-                    return true;
-                },
-                .release => |rel| if (st.dragging) {
-                    st.dragging = false;
-                    if (rel.inside) self.seekAt(n, rel.pos[0]);
-                    return true;
-                },
-                else => {},
-            }
-            return false;
-        }
-
-        fn seekAt(self: *const Self, n: *Node, x: f32) void {
-            const pad: f32 = 8;
-            const track_w = @max(n.size.w - pad * 2, 1);
-            seekTo(self.player, std.math.clamp((x - pad) / track_w, 0, 1));
+/// A player's progress, as a slider: pressing or dragging it seeks. It is
+/// disabled (no `on_changed`) while the player cannot seek.
+fn seekBar(cx: *Context, p: anytype) Widget {
+    const P = @TypeOf(p);
+    const Seek = struct {
+        fn to(q: P, frac: f32) void {
+            seekTo(q, frac);
         }
     };
+    return cx.make(kete.Slider{
+        .value = progressOf(p),
+        .on_changed = if (seekable(p)) .of(p, Seek.to) else null,
+    });
 }
 
 // --- Tests ------------------------------------------------------------------

@@ -312,9 +312,11 @@ test "video viewer describes the video and renders transport controls" {
         }
     };
     try testing.expect(Find.first(u.root.?, kete.Image) != null);
-    const seek = Find.first(u.root.?, players.SeekTrack(video.Player)).?;
+    const seek = Find.first(u.root.?, kete.Slider).?;
     const at = seek.position();
-    const click: kete.Point = .{ at[0] + seek.size.w * 0.75, at[1] + seek.size.h * 0.5 };
+    // kete's Slider's track is inset by its handle's halo at either end.
+    const inset: f32 = kete.Slider.halo_radius;
+    const click: kete.Point = .{ at[0] + inset + (seek.size.w - inset * 2) * 0.75, at[1] + seek.size.h * 0.5 };
     u.pointerMotion(click);
     u.pointerButton(click, .left, true);
     u.pointerButton(click, .left, false);
@@ -355,9 +357,11 @@ test "audio viewer describes WAV files and renders transport controls" {
             return null;
         }
     };
-    const seek = Find.first(u.root.?, players.SeekTrack(audio.Player)).?;
+    const seek = Find.first(u.root.?, kete.Slider).?;
     const at = seek.position();
-    const click: kete.Point = .{ at[0] + seek.size.w * 0.5, at[1] + seek.size.h * 0.5 };
+    // kete's Slider's track is inset by its handle's halo at either end.
+    const inset: f32 = kete.Slider.halo_radius;
+    const click: kete.Point = .{ at[0] + inset + (seek.size.w - inset * 2) * 0.5, at[1] + seek.size.h * 0.5 };
     u.pointerMotion(click);
     u.pointerButton(click, .left, true);
     u.pointerButton(click, .left, false);
