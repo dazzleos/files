@@ -58,7 +58,14 @@ pub const Files = struct {
     /// shown against it).
     now: i64 = 0,
 
-    pub fn build(self: *const Files, cx: *kete.BuildContext) kete.Widget {
+    pub const State = struct {
+        /// Scrolls the tree: to the open folder's row, when that changes.
+        tree_scroll: kete.ScrollController = .{},
+        /// The folder the tree was last scrolled to (its path's hash).
+        revealed: ?u64 = null,
+    };
+
+    pub fn build(self: *const Files, cx: *kete.BuildContext, state: *State) kete.Widget {
         const t = cx.theme();
         const b = self.browser;
 
@@ -75,14 +82,12 @@ pub const Files = struct {
         const open_row: ?usize = for (items.items, 0..) |item, i| {
             if (std.mem.eql(u8, item.path, b.path)) break i;
         } else null;
-        const rows = cx.make(kete.Grid{
-            .count = items.items.len,
-            .cell = .{ .w = kete.Grid.fill, .h = 40 },
-            .item = .of(makeTree(cx, self, items.items), Tree.row),
-            // The open folder's row is made even when it does not show, for
-            // the tree to scroll to it.
-            .keep = open_row,
-        });
+        // The open folder's row comes into view when it changes.
+        if (state.revealed != pathKey(b.path)) {
+            state.revealed = pathKey(b.path);
+            if (open_row) |r| state.tree_scroll.revealItem(r);
+        }
+        const rows = cx.make(kete.Grid.list(items.items.len, 40, .of(makeTree(cx, self, items.items), Tree.row)));
         const tree = cx.make(kete.SizedBox{
             .width = 300,
             .child = cx.make(kete.RoundedBox{
@@ -90,8 +95,7 @@ pub const Files = struct {
                 .child = cx.make(kete.Column{
                     .cross_axis_alignment = .stretch,
                     .children = &.{
-                        // The open folder's row comes into view when it changes.
-                        cx.make(kete.Expanded{ .child = cx.make(kete.ScrollView{ .reveal = pathKey(b.path), .child = cx.make(kete.Padding{
+                        cx.make(kete.Expanded{ .child = cx.make(kete.ScrollView{ .controller = &state.tree_scroll, .child = cx.make(kete.Padding{
                             .padding = .symmetric(8, 8),
                             .child = rows,
                         }) }) }),
@@ -156,7 +160,7 @@ pub const Files = struct {
             // starts again at the top.
             .icons => cx.make(kete.ScrollView{ .child = cx.make(kete.Padding{ .padding = .all(16), .child = cx.make(kete.Grid{
                 .count = b.listing.entries.len,
-                .cell = .{ .w = 128, .h = 124 },
+                .cell = .{ .w = 144, .h = 124 },
                 .spacing = 8,
                 .item = .of(self, Files.tile),
             }) }) }).withKey(pathKey(b.path)),
@@ -425,8 +429,7 @@ const Tree = struct {
             // What is dragged there goes there.
             .on_drop = if (item.locked) null else dropCallback(cx, b, item.path),
         });
-        // The open folder's row has a key, for the tree to scroll to it.
-        return if (selected) w.withKey(pathKey(item.path)) else w;
+        return w;
     }
 };
 
@@ -1100,6 +1103,15 @@ test "clicking in the grid and the tree" {
     Frame(u, &b, &now);
     try testing.expect(findText(u.root.?, "Everything on this computer") != null);
     try testing.expect(!overflows(u.root.?));
+    // A folder opened other than from the tree comes into view in it,
+    // from the tree scrolled to its end.
+    _ = scroll.scrollTo(scroll.maxOffset());
+    Frame(u, &b, &now);
+    b.request(.{ .open = "/tmp" });
+    Frame(u, &b, &now);
+    const shown = up(findText(tree, "tmp").?, TreeRow).?;
+    const shown_y = shown.position()[1] - tree.position()[1];
+    try testing.expect(shown_y >= 0 and shown_y + shown.size.h <= tree.size.h);
     // Off again: back to the user's files.
     click(u, up(findText(u.root.?, "System files").?, kete.SwitchRow).?);
     Frame(u, &b, &now);
