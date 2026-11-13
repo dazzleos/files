@@ -75,9 +75,9 @@ pub const Files = struct {
         const open_row: ?usize = for (items.items, 0..) |item, i| {
             if (std.mem.eql(u8, item.path, b.path)) break i;
         } else null;
-        const rows = cx.make(kete_vc4.LazyGrid{
+        const rows = cx.make(kete.Grid{
             .count = items.items.len,
-            .cell = .{ .w = std.math.inf(f32), .h = 40 },
+            .cell = .{ .w = kete.Grid.fill, .h = 40 },
             .item = .of(makeTree(cx, self, items.items), Tree.row),
             // The open folder's row is made even when it does not show, for
             // the tree to scroll to it.
@@ -154,7 +154,7 @@ pub const Files = struct {
             // Only the tiles or rows that show are made (a folder can have
             // a thousand items). Another folder, or the other layout,
             // starts again at the top.
-            .icons => cx.make(kete.ScrollView{ .child = cx.make(kete.Padding{ .padding = .all(16), .child = cx.make(kete_vc4.LazyGrid{
+            .icons => cx.make(kete.ScrollView{ .child = cx.make(kete.Padding{ .padding = .all(16), .child = cx.make(kete.Grid{
                 .count = b.listing.entries.len,
                 .cell = .{ .w = 128, .h = 124 },
                 .spacing = 8,
@@ -163,11 +163,7 @@ pub const Files = struct {
             .list => cx.make(kete.Column{ .cross_axis_alignment = .stretch, .children = &.{
                 listHeader(cx, self.showModified()),
                 cx.make(kete.HorizontalDivider{}),
-                cx.make(kete.Expanded{ .child = cx.make(kete.ScrollView{ .child = cx.make(kete.Padding{ .padding = .symmetric(8, 4), .child = cx.make(kete_vc4.LazyGrid{
-                    .count = b.listing.entries.len,
-                    .cell = .{ .w = std.math.inf(f32), .h = list_row_height },
-                    .item = .of(self, Files.listRow),
-                }) }) }).withKey(pathKey(b.path) +% 1) }),
+                cx.make(kete.Expanded{ .child = cx.make(kete.ScrollView{ .child = cx.make(kete.Padding{ .padding = .symmetric(8, 4), .child = cx.make(kete.Grid.list(b.listing.entries.len, list_row_height, .of(self, Files.listRow))) }) }).withKey(pathKey(b.path) +% 1) }),
             } }),
         };
 
@@ -1126,7 +1122,7 @@ fn findType(n: *kete.WidgetNode, comptime T: type) ?*kete.WidgetNode {
 
 /// The grid's tile for `name`.
 fn tile(u: *kete.ui.WindowUi, name: []const u8) ?*kete.WidgetNode {
-    const grid = up(findType(u.root.?, Tile) orelse return null, kete_vc4.LazyGrid) orelse return null;
+    const grid = up(findType(u.root.?, Tile) orelse return null, kete.Grid) orelse return null;
     return up(findText(grid, name) orelse return null, Tile);
 }
 

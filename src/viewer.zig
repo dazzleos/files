@@ -96,11 +96,7 @@ const Lines = struct {
 fn textView(cx: *kete.BuildContext, lines: []const []const u8) kete.Widget {
     const l = cx.arena.create(Lines) catch return cx.make(kete.SizedBox.empty);
     l.* = .{ .lines = lines };
-    return cx.make(kete.ScrollView{ .child = cx.make(kete.Padding{ .padding = .all(16), .child = cx.make(kete_vc4.LazyGrid{
-        .count = lines.len,
-        .cell = .{ .w = std.math.inf(f32), .h = 22 },
-        .item = .of(l, Lines.row),
-    }) }) });
+    return cx.make(kete.ScrollView{ .child = cx.make(kete.Padding{ .padding = .all(16), .child = cx.make(kete.Grid.list(lines.len, 22, .of(l, Lines.row))) }) });
 }
 
 // --- Fonts --------------------------------------------------------------------
@@ -164,11 +160,7 @@ fn hexView(cx: *kete.BuildContext, data: []const u8, width: f32) kete.Widget {
         if (pitch.width() + 2 * pad + 12 <= width) break;
     }
     b.* = .{ .data = data, .size = size, .pitch = pitch };
-    return cx.make(kete.ScrollView{ .child = cx.make(kete.Padding{ .padding = .all(pad), .child = cx.make(kete_vc4.LazyGrid{
-        .count = (data.len + pitch.per_row - 1) / pitch.per_row,
-        .cell = .{ .w = std.math.inf(f32), .h = 22 },
-        .item = .of(b, Bytes.row),
-    }) }) });
+    return cx.make(kete.ScrollView{ .child = cx.make(kete.Padding{ .padding = .all(pad), .child = cx.make(kete.Grid.list((data.len + pitch.per_row - 1) / pitch.per_row, 22, .of(b, Bytes.row))) }) });
 }
 
 /// How far apart characters are, so columns line up (Dazzle's font is not
