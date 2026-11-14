@@ -11,7 +11,6 @@
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
-const evdev = sys.evdev;
 const app = @import("app");
 const kete = @import("kete");
 const kete_vc4 = @import("kete_vc4");
@@ -36,54 +35,56 @@ pub fn main(init: std.process.Init) u8 {
 /// The window's root: the folders and the file open, as they are now.
 const Root = struct {
     browser: *browser_mod.Browser,
+    keys: *Keys,
 
     pub fn build(r: *const Root, cx: *kete.BuildContext) kete.Widget {
         const width: f32 = if (cx.window()) |w| @floatFromInt(w.size()[0]) else 1280;
-        return cx.make(view.Files{ .browser = r.browser, .width = width, .now = realNow() });
+        return cx.make(kete.KeyHandler{
+            .on_key = .of(r.keys, Keys.key),
+            .child = cx.make(view.Files{ .browser = r.browser, .width = width, .now = realNow() }),
+        });
     }
 };
 
-/// The window's own keys, whatever has the keyboard (unless a text field
-/// has it, for those that type): Backspace goes up a folder, Delete asks
-/// whether to delete the item picked, Ctrl+C, Ctrl+X and Ctrl+V copy, cut
-/// and paste, and Escape stops asking.
+/// The window's own keys, those that what has the keyboard leaves (a
+/// text field keeps what it types, and Backspace): Backspace goes up a
+/// folder, Delete asks whether to delete the item picked, Ctrl+C, Ctrl+X
+/// and Ctrl+V copy, cut and paste, Escape stops asking, and Space, Left
+/// and Right play, pause and seek what is playing.
 const Keys = struct {
     browser: *browser_mod.Browser,
-    window: ?*kete.App.Window = null,
     /// A key did something: the window is drawn again.
     pressed: bool = false,
 
-    fn key(k: *Keys, press: kete_vc4.KeyPress) void {
+    fn key(k: *Keys, press: kete.Event.Key) bool {
         const browser = k.browser;
         browser.ctrl_held = press.ctrl;
-        if (!press.pressed) return;
-        const typing = if (k.window) |w| w.ui.focused != null else false;
+        if (!press.pressed) return false;
         const now = sys.nowNs();
-        switch (press.code) {
-            evdev.key_backspace => if (!typing) browser.request(.up),
-            evdev.key_delete => if (!typing and browser.prompt == .none) browser.request(.{ .prompt = .delete }),
-            evdev.key_esc => if (browser.prompt != .none) browser.request(.{ .prompt = .none }),
-            evdev.key_c => if (!typing and press.ctrl) browser.request(.copy),
-            evdev.key_x => if (!typing and press.ctrl) browser.request(.cut),
-            evdev.key_v => if (!typing and press.ctrl) browser.request(.paste),
-            evdev.key_space => if (!typing and browser.prompt == .none) if (browser.file) |*f| switch (f.kind) {
-                .video => |player| player.togglePlay(now),
-                .audio => |player| player.togglePlay(),
-                else => {},
+        const asking = browser.prompt != .none;
+        switch (press.key) {
+            .backspace => browser.request(.up),
+            .delete => if (!asking) browser.request(.{ .prompt = .delete }) else return false,
+            .escape => if (asking) browser.request(.{ .prompt = .none }) else return false,
+            .c => if (press.ctrl) browser.request(.copy) else return false,
+            .x => if (press.ctrl) browser.request(.cut) else return false,
+            .v => if (press.ctrl) browser.request(.paste) else return false,
+            .space, .left, .right => {
+                // What is playing: Space plays and pauses, Left and Right
+                // seek.
+                if (asking) return false;
+                const f = if (browser.file) |*f| f else return false;
+                const back = press.key == .left;
+                switch (f.kind) {
+                    .video => |player| if (press.key == .space) player.togglePlay(now) else player.seekTo(if (back) player.position_us -| 5_000_000 else player.position_us + 5_000_000, now),
+                    .audio => |player| if (press.key == .space) player.togglePlay() else player.seekRelativeMs(if (back) -5000 else 5000),
+                    else => return false,
+                }
             },
-            evdev.key_left => if (!typing and browser.prompt == .none) if (browser.file) |*f| switch (f.kind) {
-                .video => |player| player.seekTo(player.position_us -| 5_000_000, now),
-                .audio => |player| player.seekRelativeMs(-5000),
-                else => {},
-            },
-            evdev.key_right => if (!typing and browser.prompt == .none) if (browser.file) |*f| switch (f.kind) {
-                .video => |player| player.seekTo(player.position_us + 5_000_000, now),
-                .audio => |player| player.seekRelativeMs(5000),
-                else => {},
-            },
-            else => {},
+            else => return false,
         }
         k.pressed = true;
+        return true;
     }
 };
 
@@ -104,8 +105,7 @@ fn run(init: std.process.Init) !void {
     if (browser.watch_fd) |fd| host.wakeOn(fd, true);
 
     var keys: Keys = .{ .browser = &browser };
-    host.display.on_key = .of(&keys, Keys.key);
-    const root: Root = .{ .browser = &browser };
+    const root: Root = .{ .browser = &browser, .keys = &keys };
     const window = try host.app.openWindow(.{
         .title = "Files",
         .root = .of(&root),
@@ -113,7 +113,6 @@ fn run(init: std.process.Init) !void {
         .min_size = view.min_size,
         .on_close_request = .close,
     });
-    keys.window = window;
 
     var last_progress: u64 = 0;
     var suspended = false;
@@ -158,4 +157,60 @@ test {
 /// The time now, in seconds since 1970.
 fn realNow() i64 {
     return sys.realtimeSec();
+}
+
+const testing = std.testing;
+
+test "the window's keys: those a field leaves while it has the keyboard, and all with nothing focused" {
+    var t: fs.TestTree = .{};
+    try t.init();
+    defer t.deinit();
+    var b = try browser_mod.Browser.init(testing.allocator, t.path);
+    defer b.deinit();
+    var keys: Keys = .{ .browser = &b };
+    const root: Root = .{ .browser = &b, .keys = &keys };
+    const fira = try kete.font.Font.init(@embedFile("FiraSans-Regular.ttf"));
+    const u = try kete.ui.WindowUi.create(testing.allocator, testing.io, &fira);
+    defer u.destroy();
+    var n: u64 = 0;
+    const Frame = struct {
+        fn draw(uu: *kete.ui.WindowUi, bb: *browser_mod.Browser, nn: *u64, r: Root) void {
+            _ = bb.apply();
+            nn.* += 1;
+            uu.frame(1600, 900, nn.*, r);
+        }
+    }.draw;
+    const press = struct {
+        fn f(uu: *kete.ui.WindowUi, key: kete.KeyboardKey, char: ?u21) void {
+            uu.key(.{ .key = key, .pressed = true, .char = char });
+            uu.key(.{ .key = key, .pressed = false });
+        }
+    }.f;
+    var path_buf: [128]u8 = undefined;
+    b.request(.{ .open = try std.fmt.bufPrint(&path_buf, "{s}/A-folder", .{t.path}) });
+    Frame(u, &b, &n, root);
+    try testing.expect(std.mem.endsWith(u8, b.path, "/A-folder"));
+
+    // Naming a new folder, the field has the keyboard: Backspace edits the
+    // name (rather than going up), and Escape stops asking.
+    b.request(.{ .prompt = .new_folder });
+    Frame(u, &b, &n, root);
+    Frame(u, &b, &n, root);
+    try testing.expect(u.focused != null and u.focused.?.widget.is(kete.TextField));
+    press(u, .a, 'a');
+    press(u, .backspace, null);
+    Frame(u, &b, &n, root);
+    try testing.expect(std.mem.endsWith(u8, b.path, "/A-folder"));
+    try testing.expectEqual(browser_mod.Prompt.new_folder, b.prompt);
+    press(u, .escape, null);
+    Frame(u, &b, &n, root);
+    Frame(u, &b, &n, root);
+    try testing.expectEqual(browser_mod.Prompt.none, b.prompt);
+
+    // With nothing focused, Backspace goes up.
+    try testing.expect(u.focused == null);
+    press(u, .backspace, null);
+    Frame(u, &b, &n, root);
+    try testing.expectEqualStrings(t.path, b.path);
+    try testing.expect(keys.pressed);
 }
