@@ -1472,7 +1472,7 @@ test "a PNG image shown can be made the desktop's background; other files cannot
     var settings_buf: [64]u8 = undefined;
     const settings = try std.mem.printSentinel(&settings_buf, "/tmp/dazzle-files-appearance-{d}", .{linux.getpid()}, 0);
     defer _ = linux.unlink(settings);
-    appearance.saveSettingsTo(settings, .{ .theme = .light, .background = .teal });
+    appearance.saveSettingsTo(settings, .{ .theme = .light });
 
     var b = try Browser.init(testing.allocator, t.path);
     defer b.deinit();
@@ -1483,7 +1483,7 @@ test "a PNG image shown can be made the desktop's background; other files cannot
     b.request(.view);
     _ = b.apply();
     try testing.expect(b.file != null and !b.canSetBackground());
-    // The image: yes, keeping the theme and colour.
+    // The image: yes, keeping the theme.
     var path_buf: [128]u8 = undefined;
     b.request(.{ .open = try std.fmt.bufPrint(&path_buf, "{s}/A-folder", .{t.path}) });
     _ = b.apply();
@@ -1497,6 +1497,5 @@ test "a PNG image shown can be made the desktop's background; other files cannot
     const s = appearance.loadSettingsFrom(settings);
     try testing.expectEqualStrings(try std.fmt.bufPrint(&path_buf, "{s}/A-folder/sea.png", .{t.path}), s.image.slice().?);
     try testing.expectEqual(appearance.Mode.light, s.theme);
-    try testing.expectEqual(appearance.Background.teal, s.background);
     try testing.expect(std.mem.indexOf(u8, b.notice().?, "sea.png") != null);
 }
