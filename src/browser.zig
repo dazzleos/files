@@ -16,6 +16,7 @@ const sys = @import("sys");
 const fs = @import("fs.zig");
 const copier = @import("copier.zig");
 const content = @import("content.zig");
+const appearance = @import("appearance");
 
 const watch_mask = linux.IN.CREATE | linux.IN.DELETE | linux.IN.MOVED_FROM | linux.IN.MOVED_TO | linux.IN.CLOSE_WRITE | linux.IN.ATTRIB | linux.IN.DELETE_SELF | linux.IN.MOVE_SELF;
 
@@ -68,6 +69,8 @@ pub const Action = union(enum) {
     cancel_copy,
     /// Dismiss the notice snackbar.
     dismiss_notice,
+    /// Make the image shown the desktop's background.
+    set_background,
 };
 
 pub const Drop = struct { index: usize, into: []const u8, copy: bool = false };
@@ -137,6 +140,8 @@ pub const Browser = struct {
     /// the bottom until something else is done.
     notice_buf: [200]u8 = undefined,
     notice_len: usize = 0,
+    /// The appearance settings, where the background image is chosen.
+    appearance_file: [:0]const u8 = appearance.settings_file,
     /// The text editor (its program), if an app that edits text is
     /// installed: `editor_len` bytes of `editor_buf`.
     editor_buf: [256]u8 = undefined,
@@ -323,8 +328,30 @@ pub const Browser = struct {
             .drop => |d| b.drop(d),
             .cancel_copy => if (b.copier) |c| c.cancel(),
             .dismiss_notice => {},
+            .set_background => b.setBackground(),
         }
         return true;
+    }
+
+    /// Whether the file shown can be the desktop's background: a PNG
+    /// image (what the shell reads).
+    pub fn canSetBackground(b: *const Browser) bool {
+        const f = b.file orelse return false;
+        return switch (f.kind) {
+            .image => |img| img.format == .png,
+            else => false,
+        };
+    }
+
+    fn setBackground(b: *Browser) void {
+        if (!b.canSetBackground()) return;
+        const path = b.filePath(b.gpa) orelse return;
+        defer b.gpa.free(path);
+        if (path.len > appearance.ImagePath.max_len) return b.say("The background cannot be set: its path is too long", .{});
+        var s = appearance.loadSettingsFrom(b.appearance_file);
+        s.image = .of(path);
+        appearance.saveSettingsTo(b.appearance_file, s);
+        b.say("\u{201c}{s}\u{201d} is the background", .{fs.baseName(path)});
     }
 
     /// Whether something is being copied or moved.
@@ -1432,4 +1459,44 @@ test "watching folders: external files and folders made, changed and deleted upd
     try testing.expect(b.checkWatches());
     try testing.expect(b.selected == null);
     try testing.expect(b.file == null);
+}
+
+test "a PNG image shown can be made the desktop's background; other files cannot" {
+    var t: fs.TestTree = .{};
+    try t.init();
+    defer t.deinit();
+    const pixels: [4]u32 = @splat(0xff336699);
+    const png = try @import("gfx").png.encode(testing.allocator, &pixels, 2, 2);
+    defer testing.allocator.free(png);
+    try t.write("A-folder/sea.png", png, 0o644);
+    var settings_buf: [64]u8 = undefined;
+    const settings = try std.mem.printSentinel(&settings_buf, "/tmp/dazzle-files-appearance-{d}", .{linux.getpid()}, 0);
+    defer _ = linux.unlink(settings);
+    appearance.saveSettingsTo(settings, .{ .theme = .light, .background = .teal });
+
+    var b = try Browser.init(testing.allocator, t.path);
+    defer b.deinit();
+    b.appearance_file = settings;
+    // A text file shown: no.
+    b.request(.{ .activate = 2 });
+    _ = b.apply();
+    b.request(.view);
+    _ = b.apply();
+    try testing.expect(b.file != null and !b.canSetBackground());
+    // The image: yes, keeping the theme and colour.
+    var path_buf: [128]u8 = undefined;
+    b.request(.{ .open = try std.fmt.bufPrint(&path_buf, "{s}/A-folder", .{t.path}) });
+    _ = b.apply();
+    b.request(.{ .activate = 0 });
+    _ = b.apply();
+    b.request(.view);
+    _ = b.apply();
+    try testing.expect(b.canSetBackground());
+    b.request(.set_background);
+    _ = b.apply();
+    const s = appearance.loadSettingsFrom(settings);
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&path_buf, "{s}/A-folder/sea.png", .{t.path}), s.image.slice().?);
+    try testing.expectEqual(appearance.Mode.light, s.theme);
+    try testing.expectEqual(appearance.Background.teal, s.background);
+    try testing.expect(std.mem.indexOf(u8, b.notice().?, "sea.png") != null);
 }

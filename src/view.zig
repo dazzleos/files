@@ -296,6 +296,12 @@ pub const Files = struct {
                         .icon = .visibility,
                         .on_press = callback(cx, .{ .browser = b }, Act.view),
                     }) else cx.make(kete.SizedBox.empty),
+                    // An image shown, as the desktop's background.
+                    if (b.canSetBackground()) cx.make(kete.OutlinedButton{
+                        .label = if (labels) "Set as background" else "",
+                        .icon = .wallpaper,
+                        .on_press = callback(cx, .{ .browser = b }, Act.setBackground),
+                    }) else cx.make(kete.SizedBox.empty),
                     // Text files, if there is an editor for them.
                     if (b.canEdit()) cx.make(kete.OutlinedButton{
                         .label = if (labels) "Edit" else "",
@@ -517,6 +523,10 @@ const Act = struct {
 
     fn paste(a: *const Act) void {
         a.browser.request(.paste);
+    }
+
+    fn setBackground(a: *const Act) void {
+        a.browser.request(.set_background);
     }
 
     fn stopCopy(a: *const Act) void {
