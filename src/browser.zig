@@ -349,7 +349,7 @@ pub const Browser = struct {
         defer b.gpa.free(path);
         if (path.len > appearance.ImagePath.max_len) return b.say("The background cannot be set: its path is too long", .{});
         var s = appearance.loadSettingsFrom(b.appearance_file);
-        s.image = .of(path);
+        s.chooseCustom(path);
         appearance.saveSettingsTo(b.appearance_file, s);
         b.say("\u{201c}{s}\u{201d} is the background", .{fs.baseName(path)});
     }
