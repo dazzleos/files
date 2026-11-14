@@ -11,6 +11,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys");
+const evdev = sys.evdev;
 const app = @import("app");
 const kete = @import("kete");
 const kete_vc4 = @import("kete_vc4");
@@ -19,19 +20,6 @@ const browser_mod = @import("browser.zig");
 const view = @import("view.zig");
 
 const print = sys.print;
-
-/// Keys: Backspace goes up a folder, Delete asks whether to delete the
-/// item picked, Ctrl+C, Ctrl+X and Ctrl+V copy, cut and paste, and
-/// Escape stops asking (unless a text field has them).
-const key_backspace = 14;
-const key_c = 46;
-const key_x = 45;
-const key_v = 47;
-const key_space = 57;
-const key_left = 105;
-const key_right = 106;
-const key_delete = 111;
-const key_escape = 1;
 
 /// How often the progress of a copy is drawn.
 const progress_ns = 250 * std.time.ns_per_ms;
@@ -56,7 +44,9 @@ const Root = struct {
 };
 
 /// The window's own keys, whatever has the keyboard (unless a text field
-/// has it, for those that type).
+/// has it, for those that type): Backspace goes up a folder, Delete asks
+/// whether to delete the item picked, Ctrl+C, Ctrl+X and Ctrl+V copy, cut
+/// and paste, and Escape stops asking.
 const Keys = struct {
     browser: *browser_mod.Browser,
     window: ?*kete.App.Window = null,
@@ -70,23 +60,23 @@ const Keys = struct {
         const typing = if (k.window) |w| w.ui.focused != null else false;
         const now = sys.nowNs();
         switch (press.code) {
-            key_backspace => if (!typing) browser.request(.up),
-            key_delete => if (!typing and browser.prompt == .none) browser.request(.{ .prompt = .delete }),
-            key_escape => if (browser.prompt != .none) browser.request(.{ .prompt = .none }),
-            key_c => if (!typing and press.ctrl) browser.request(.copy),
-            key_x => if (!typing and press.ctrl) browser.request(.cut),
-            key_v => if (!typing and press.ctrl) browser.request(.paste),
-            key_space => if (!typing and browser.prompt == .none) if (browser.file) |*f| switch (f.kind) {
+            evdev.key_backspace => if (!typing) browser.request(.up),
+            evdev.key_delete => if (!typing and browser.prompt == .none) browser.request(.{ .prompt = .delete }),
+            evdev.key_esc => if (browser.prompt != .none) browser.request(.{ .prompt = .none }),
+            evdev.key_c => if (!typing and press.ctrl) browser.request(.copy),
+            evdev.key_x => if (!typing and press.ctrl) browser.request(.cut),
+            evdev.key_v => if (!typing and press.ctrl) browser.request(.paste),
+            evdev.key_space => if (!typing and browser.prompt == .none) if (browser.file) |*f| switch (f.kind) {
                 .video => |player| player.togglePlay(now),
                 .audio => |player| player.togglePlay(),
                 else => {},
             },
-            key_left => if (!typing and browser.prompt == .none) if (browser.file) |*f| switch (f.kind) {
+            evdev.key_left => if (!typing and browser.prompt == .none) if (browser.file) |*f| switch (f.kind) {
                 .video => |player| player.seekTo(player.position_us -| 5_000_000, now),
                 .audio => |player| player.seekRelativeMs(-5000),
                 else => {},
             },
-            key_right => if (!typing and browser.prompt == .none) if (browser.file) |*f| switch (f.kind) {
+            evdev.key_right => if (!typing and browser.prompt == .none) if (browser.file) |*f| switch (f.kind) {
                 .video => |player| player.seekTo(player.position_us + 5_000_000, now),
                 .audio => |player| player.seekRelativeMs(5000),
                 else => {},
